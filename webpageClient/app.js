@@ -203,20 +203,37 @@ function handleMessage(msg) {
       break;
 
     // 指令相关
-    case 'command':
-      addLog('in', msg.command, `收到指令 · from=${(msg.command.from || []).join(',') || '未知'}`);
+    case 'command': {
+      // 本窗口作为指令接收方
+      const c = msg.command || msg;
+      addLog('in', c, `收到指令 · from=${(c.from || []).join(',') || '未知'}`);
       break;
+    }
 
     case 'command_result': {
       const r = msg.result || {};
-      const detail = r.error
-        ? r.error
-        : (r.delivered !== undefined
-          ? `已送达 ${r.delivered} 个：${(r.targets || []).join(',') || '无'}`
-          : JSON.stringify(r).slice(0, 120));
-      addLog(msg.ok ? 'out' : 'err', msg.command, detail, msg.ok);
-      toast(msg.ok ? `指令已送达：${detail}` : `指令失败：${detail}`,
-        msg.ok ? 'ok' : 'err', 3200);
+      let detail;
+      if (r.error) {
+        detail = r.error;
+      } else if (r.awaiting_ack) {
+        // 刚送达、还没等来回执 —— 与回执事件区分开，便于判断卡在哪一步
+        detail = `已送达 ${r.delivered} 个：${(r.targets || []).join(',') || '无'} · 等待回执…`;
+      } else if (r.delivered !== undefined) {
+        detail = `已送达 ${r.delivered} 个：${(r.targets || []).join(',') || '无'}`;
+      } else if (r.detail !== undefined) {
+        detail = `回执：${r.detail}`;
+      } else {
+        detail = JSON.stringify(r).slice(0, 120);
+      }
+      const isAck = !r.awaiting_ack;
+      addLog(msg.ok ? (isAck ? 'exec' : 'out') : 'err', msg.command, detail, msg.ok);
+      toast(
+        msg.ok
+          ? (isAck ? `客户端回执：${detail}` : `指令已送达，等待回执…`)
+          : `指令失败：${detail}`,
+        msg.ok ? 'ok' : 'err',
+        isAck ? 4000 : 2600,
+      );
       break;
     }
 
@@ -226,7 +243,11 @@ function handleMessage(msg) {
         const r = msg.result || {};
         addLog('exec', cmd, r.error || JSON.stringify(r).slice(0, 140), r.ok);
       } else {
-        addLog('out', cmd, `转发 ${msg.delivered ?? 0} 个：${(msg.targets || []).join(',') || '无'}`);
+        addLog(
+          'out',
+          cmd,
+          `转发 ${msg.delivered ?? 0} 个：${(msg.targets || []).join(',') || '无'} · 等待回执…`,
+        );
       }
       break;
     }

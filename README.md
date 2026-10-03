@@ -38,13 +38,13 @@ python server.py --open-browser
 python tools/test_client.py --count 5 --interval 1
 ```
 
-自检（共 229 项）：
+自检（共 236 项）：
 
 ```bash
 python tools/verify.py            # 后端 17 项：HTTP + WebSocket + 落盘一致性
 python tools/verify_clients.py    # 客户端列表 29 项：登记/注销/计数/广播
 python tools/verify_command.py    # 指令功能 56 项：转发/服务端执行/工作流指令
-node tools/verify_frontend.js     # 前端 99 项：渲染/排序/灯箱/客户端面板/Tab/指令面板
+node tools/verify_frontend.js     # 前端 105 项：渲染/排序/灯箱/客户端面板/Tab/指令面板
 node tools/verify_ws_reuse.js     # 连接复用 28 项：重连/排队/心跳（ComfyUI 场景）
 ```
 
@@ -303,7 +303,7 @@ MoyuWebscoketServer/
 │   ├── verify.py            # 后端端到端自检（17 项）
 │   ├── verify_clients.py    # 客户端列表自检（29 项）
 │   ├── verify_command.py    # 指令功能自检（56 项）
-│   ├── verify_frontend.js   # 前端逻辑离线校验（99 项，DOM 桩）
+│   ├── verify_frontend.js   # 前端逻辑离线校验（105 项，DOM 桩）
 │   ├── verify_ws_reuse.js   # 连接复用逻辑测试（28 项，桩 WebSocket）
 │   ├── gen_run_bat.py       # 字节级生成 run.bat（UTF-8 无 BOM + 全 CRLF）
 │   └── shot.js              # 无头 Chrome 截图（开发期核对 UI）
@@ -382,12 +382,29 @@ A：推送端要连 8801 端口才能被登记。如果用 `?client=名字` 自�
 名字会显示在列表里；不传则自动生成 `ComfyUI-xxxx`。
 
 **Q：点了「运行工作流」客户端没反应**
-A：看指令日志的 `exec` / `err` 条目。常见原因：
+A：看指令日志 —— 两条日志能定位卡在哪：
+- `已送达 N 个：xxx · 等待回执…` → 服务端投递成功，**客户端还没回执**
+- 什么都没有 → 指令没发出去（检查 `to` 里的 id 是否在线）
+
+若一直停在「等待回执」，说明客户端收到了但没处理。跑探针确认：
+
+```bash
+python tools/probe_command.py            # 探测所有推送端
+python tools/probe_command.py <客户端id>  # 只探测指定客户端
+```
+
+探针会明确告诉你是「没收到」还是「收到了没回执」。常见原因：
 ① ComfyUI 侧没有加载本仓库的 `clientExample.js`（旧脚本不处理指令）；
-② `run_workflow` 的工作流 JSON 格式与目标 ComfyUI 版本不匹配。
+② 客户端没重新加载最新脚本；
+③ 客户端把消息路由到了别处。
+**快速验证**：发一条 `name=whoami` 的指令，会回执的客户端就说明通道已通。
+
+> 客户端 UA 显示 `Mozilla/...` 通常意味着它是浏览器里的页面（油猴脚本等），
+> 而不是 ComfyUI 节点 —— 这类客户端需要自己实现指令处理与回执。
 
 **Q：指令发出去提示「未知服务端指令」**
-A：没填 `to` 时才会走服务端执行。可用指令见上文「服务端内置指令」，
+A：没填 `to` 时才会走服务端执行。可用指令见上文「服务端内置指令」
+（含 `ping` / `whoami` / `echo` / `stats` / `clients` / `history` / `broadcast`），
 或点「发送指令」（填了 `to`）把指令转发给客户端执行。
 
 **Q：run.bat 双击后闪退**

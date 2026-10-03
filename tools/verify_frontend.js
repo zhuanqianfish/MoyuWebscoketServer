@@ -458,7 +458,49 @@ vm.runInContext(`
 `, ctx);
 check(vm.runInContext('state.logs.length', ctx) === 3, '三类指令消息都入日志', String(vm.runInContext('state.logs.length', ctx)));
 const dirs = vm.runInContext('state.logs.map(l => l.dir).join(",")', ctx);
-check(dirs.includes('in') && dirs.includes('out') && dirs.includes('exec'), '方向标记齐全', dirs);
+// 入站指令=in，投递提示与客户端回执都归为 exec（执行侧），command_log 走 exec
+check(dirs.includes('in') && dirs.includes('exec'), '方向标记齐全', dirs);
+check(
+  vm.runInContext("state.logs.some(l => l.name === 'from_client' && l.dir === 'in')", ctx),
+  '收到的指令标 in'
+);
+check(
+  vm.runInContext("state.logs.some(l => l.name === 'ping' && l.dir === 'exec')", ctx),
+  '服务端执行标 exec'
+);
+
+section('投递提示 vs 客户端回执');
+// 已送达（awaiting_ack）应标 out，客户端回执应标 exec —— 便于判断卡在哪一步
+vm.runInContext('state.logs = [];', ctx);
+vm.runInContext(`
+  handleMessage({ type: 'command_result', ok: true, command: { name: 'run' },
+                  result: { delivered: 1, targets: ['A'], awaiting_ack: true } });
+`, ctx);
+check(
+  vm.runInContext('state.logs[0].dir', ctx) === 'out',
+  '已送达提示标 out',
+  vm.runInContext('state.logs[0].dir', ctx)
+);
+check(
+  vm.runInContext("state.logs[0].desc.includes('等待回执')", ctx),
+  '提示语说明在等回执',
+  vm.runInContext('state.logs[0].desc', ctx)
+);
+
+vm.runInContext(`
+  handleMessage({ type: 'command_result', ok: true, command: { name: 'run' },
+                  result: { ok: true, detail: '工作流已执行' } });
+`, ctx);
+check(
+  vm.runInContext('state.logs[0].dir', ctx) === 'exec',
+  '客户端回执标 exec',
+  vm.runInContext('state.logs[0].dir', ctx)
+);
+check(
+  vm.runInContext("state.logs[0].desc.includes('工作流已执行')", ctx),
+  '回执内容透传',
+  vm.runInContext('state.logs[0].desc', ctx)
+);
 
 section('日志条数上限');
 vm.runInContext(`

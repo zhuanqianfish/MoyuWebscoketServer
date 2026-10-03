@@ -54,6 +54,12 @@ ComfyUI 出图的中转站：**ComfyUI 推 base64 → Python 服务端解码落�
   `_on_text` 里**必须先判 b64 再判指令**，否则推图会被误判成指令。
 - **`command_log` / `command_result` 只发网页端**（`_broadcast_to_web`）——
   推送端只该收到要执行的指令，日志流进指令通道会被误解析。
+- **`awaiting_ack` 区分「已送达」与「客户端真回执」**：
+  投递提示带 `result.awaiting_ack=true`，真回执没有该字段。
+  前端日志据此分色（out 灰青 / exec 紫）。排查无响应先看这条。
+- **排查指令无响应跑 `python tools/probe_command.py [id]`**：
+  直接看客户端收没收到、回没回执。**先看 UA** ——
+  `Mozilla/...` 是浏览器页面（油猴脚本）而非 ComfyUI 节点。
 - **网页是双 tab**：指令服务器（默认，`LS_TAB` 持久化）在前，推送图片在后。
   新 DOM id 必须同步加进 `tools/verify_frontend.js` 的 `IDS` 桩，否则测试炸。
 - **`.card` 类名已被图片卡片占用**，指令面板那几块要用 `.panel-box` /
@@ -72,12 +78,13 @@ python tools/test_client.py --count 5   # 模拟 ComfyUI 推图
 python tools/verify.py                  # 后端自检 17 项
 python tools/verify_clients.py          # 客户端列表自检 29 项
 python tools/verify_command.py          # 指令功能自检 56 项
-node tools/verify_frontend.js           # 前端自检 99 项（DOM 桩，免浏览器）
+node tools/verify_frontend.js           # 前端自检 105 项（DOM 桩，免浏览器）
 node tools/verify_ws_reuse.js           # 连接复用自检 28 项（桩 WebSocket）
 node tools/shot.js 名称 [hash]          # 无头 Chrome 截图（核对 UI）
+python tools/probe_command.py [id]      # 指令投递探针（排查客户端无响应）
 ```
 
-合计 229 项自检，改完代码应全绿。
+合计 236 项自检，改完代码应全绿。
 
 ## Git
 

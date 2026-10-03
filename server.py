@@ -584,6 +584,8 @@ class MoyuServer:
         self.cfg = cfg
         self.store = ImageStore(cfg)
         self.hub = Broadcaster()
+        # 最近发出的指令 → 等待回执的信息（用于日志提示与排查）
+        self._pending_cmds: Dict[str, Dict[str, Any]] = {}
         self.started_at = time.time()
         self._apps: List[web.Application] = []
 
@@ -925,6 +927,12 @@ class MoyuServer:
                     "from": frm[0] if isinstance(frm, list) and frm else frm,
                 }
             )
+            # 销账：这条指令已收到回执
+            cname = cmd.get("name") or ""
+            if cname and cname in self._pending_cmds:
+                self._pending_cmds.pop(cname, None)
+                detail = (result or {}).get("detail") if isinstance(result, dict) else None
+                self.log(f"  ✓ 客户端已回执「{cname}」{f'：{detail}' if detail else ''}")
             return
 
         # 兼容两种形态：
@@ -995,6 +1003,16 @@ class MoyuServer:
         self.log(
             f"指令「{cmd['name'] or '(无名)'}」已转发给 {delivered} 个客户端：{names}"
         )
+        self.log(f"  ↳ 等待客户端回执（回执会显示在网页端指令日志里）")
+
+        # 记录本次指令，等待客户端回执时能对上号
+        self._pending_cmds[cmd["name"]] = {
+            "to": list(targets),
+            "targets": names,
+            "delivered": delivered,
+            "ts": time.time(),
+        }
+
         # 回执给发送方（含实际送达名单）
         await self.hub.send(
             sender,
@@ -1002,7 +1020,12 @@ class MoyuServer:
                 "type": "command_result",
                 "ok": True,
                 "command": cmd,
-                "result": {"delivered": delivered, "targets": names},
+                "result": {
+                    "delivered": delivered,
+                    "targets": names,
+                    "awaiting_ack": True,
+                    "hint": "已送达，等待客户端回执；若日志无响应说明客户端未处理该指令",
+                },
             },
         )
         # 日志只同步给网页端 —— 推送端只该收到指令本身，不该看到控制台日志
@@ -1013,6 +1036,7 @@ class MoyuServer:
                 "command": cmd,
                 "delivered": delivered,
                 "targets": names,
+                "awaiting_ack": True,
             }
         )
 
@@ -1060,6 +1084,20 @@ class MoyuServer:
     async def _cmd_ping(self, cmd: Dict[str, Any]) -> Dict[str, Any]:
         return {"pong": True, "ts": time.time()}
 
+    async def _cmd_whoami(self, cmd: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        问客户端「你是谁、连的是哪个版本」。
+
+        排查指令无响应最有用的一条：客户端若实现了这个指令就会回执，
+        回执里带上它的 id / 名字，一眼就能确认是不是目标连上了。
+        """
+        return {
+            "pong": True,
+            "server": APP_NAME,
+            "version": VERSION,
+            "note": "客户端若回执此指令，说明指令通道已连通",
+        }
+
     async def _cmd_echo(self, cmd: Dict[str, Any]) -> Dict[str, Any]:
         return {"echo": cmd["parameter"], "other": cmd["other"]}
 
@@ -1092,6 +1130,7 @@ class MoyuServer:
     def _server_commands(self) -> Dict[str, Any]:
         return {
             "ping": self._cmd_ping,
+            "whoami": self._cmd_whoami,
             "echo": self._cmd_echo,
             "stats": self._cmd_stats,
             "clients": self._cmd_clients,
