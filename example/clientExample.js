@@ -1,27 +1,9 @@
 /**
  * ComfyUI → Moyu 图片中转站（Python WebSocket 服务端）
+ * 只是个例子，可配合测试工作流1.json 一起使用
  * ====================================================
  *
  * 把节点里的 base64 图片推到本地 Python 服务端，由服务端转发给网页客户端显示 / 保存。
- *
- * 【本版本解决的核心问题】
- *   原版每次运行都 `new WebSocket(wsUrl)`，发完立刻 `ws.close()`。
- *   ComfyUI 每跑一次工作流就执行一遍本脚本，于是：
- *     - 连接被反复创建 / 关闭，TIME_WAIT 累积，极易耗尽本地端口
- *     - 每次都要重新握手（TCP + WebSocket 升级），慢且不稳
- *     - 大量 "连接失败" 噪音，掩盖真正的错误
- *
- *   现在改成：把连接挂在 globalThis 上做单例复用。
- *     - 连接已就绪 → 直接 send，零握手开销
- *     - 正在连接 → 排队等 open 后再发
- *     - 已断开   → 自动重建（带退避重试）
- *   连接不再主动关闭，保持长连接，由服务端心跳维持。
- *
- * 【整个脚本包在 IIFE 里】
- *   这样重复执行不会因为 `const HOST` 之类重复声明而抛
- *   "Identifier has already been declared"。
- *   需要对外暴露的函数会挂到 globalThis 上（见文件末尾）。
- *
  * 【ComfyUI 使用说明】
  *   本脚本应放在能重复执行的位置（如「执行某个节点前后」的自定义节点、
  *   或提示词节点的脚本区域）。反复运行不会重复建连接。
@@ -361,63 +343,12 @@ function moyuSend(base64Data, label) {
     return false;
 }
 
-// ===================== ComfyUI 节点索引 =====================
-// 保留原脚本里 find() 出来的节点引用，按需取用。
-var n7 = find(7); // CLIP Text Encode (Prompt)
-var n101 = find(101); // TextEncodeQwenImageEditPlus
-var n103 = find(103); // Load Image
-var n104 = find(104); // LayerUtility: ImageScaleByAspectRatio V2
-var n118 = find(118); // Load LoRA
-var n119 = find(119); // Load CLIP
-var n120 = find(120); // Load Diffusion Model
-var n121 = find(121); // Load VAE
-var n123 = find(123); // Empty Latent Image
-var n124 = find(124); // ModelSamplingAuraFlow
-var n125 = find(125); // KSampler
-var n126 = find(126); // VAE Decode
-var n127 = find(127); // Preview Image
-var n131 = find(131); // LayerUtility: Image Reel
-var n132 = find(132); // LayerUtility: Image Reel Composit
-var n142 = find(142); // Load Diffusion Model
-var n167 = find(167); // Show Any
-var n168 = find(168); // Show Any
-var n169 = find(169); // Upscale Image By
-var n170 = find(170); // 🔧 Image Resize
-var n171 = find(171); // 🔧 Get Image Size
-var n172 = find(172); // TTP_Image_Assy
-var n173 = find(173); // SeedVR2 (Down)Load DiT Model
-var n174 = find(174); // SeedVR2 (Down)Load VAE Model
-var n175 = find(175); // Note
-var n176 = find(176); // 🔧 Image Resize
-var n177 = find(177); // Show Any
-var n178 = find(178); // Show Any
-var n179 = find(179); // 🔧 Get Image Size
-var n180 = find(180); // TTP_Image_Tile_Batch
-var n181 = find(181); // TTP_Tile_image_size
-var n182 = find(182); // Upscale Image By
-var n183 = find(183); // Clean VRAM Used
-var n184 = find(184); // 高质量图片压缩
-var n185 = find(185); // SeedVR2 Video Upscaler (v2.5.15)
-var n188 = find(188); // Save Image
-var n189 = find(189); // Save Image
-var n191 = find(191); // Preview Image
-var n192 = find(192); // Float
-var n193 = find(193); // Image Comparer (rgthree)
-var n195 = find(195); // 鸭鸭图 SuperSecureMediaProtection媒体内容保护 编码V1.2
-var n196 = find(196); // Save Image
-var n197 = find(197); // Load Image
-var n198 = find(198); // PlaySound 🐍
-var n199 = find(199); // Image To Base64
-var n200 = find(200); // Save Text
-var n201 = find(201); // PlaySound 🐍
-var n204 = find(204); // EasySeed
-var n205 = find(205); // LATENT WebSocket Sender @ vrch.ai
-var n206 = find(206); // PlaySound 🐍
-var n208 = find(208); // PlaySound 🐍
+// ===================== ComfyUI 节点索引 
+var n8 = find(8); 
 
 // ===================== ComfyUI 原有逻辑 =====================
 // ↓↓↓ 按实际情况修改 ↓↓↓
-var base64Data = n208.widgets[0].inputEl.value;  // 从哪个节点读 base64
+var base64Data = n8.widgets[0].inputEl.value;  // 从哪个节点读 base64
 
 // 想让网页端显示一个好认的标题，就填节点名，例如 'TextEncodeQwenImageEditPlus'
 var imageLabel = 'Image To Base64';
