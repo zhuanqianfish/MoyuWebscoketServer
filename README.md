@@ -43,7 +43,7 @@ python tools/test_client.py --count 5 --interval 1
 ```bash
 python tools/verify.py            # 后端 17 项：HTTP + WebSocket + 落盘一致性
 python tools/verify_clients.py    # 客户端列表 29 项：登记/注销/计数/广播
-python tools/verify_command.py    # 指令功能 44 项：转发/服务端执行/工作流指令
+python tools/verify_command.py    # 指令功能 56 项：转发/服务端执行/工作流指令
 node tools/verify_frontend.js     # 前端 99 项：渲染/排序/灯箱/客户端面板/Tab/指令面板
 node tools/verify_ws_reuse.js     # 连接复用 28 项：重连/排队/心跳（ComfyUI 场景）
 ```
@@ -138,6 +138,14 @@ moyuDisconnect();                    // 一般不需要，除非想主动断开
 | `other` | 透传字段，服务端不解释 |
 | `from` | 发送方。本服务器发出时固定为 `["server"]` |
 | `to` | 接收方。填客户端 **id 或名字**（名字可匹配多个）；**留空 = 由服务端执行** |
+
+> **指令是平铺的** —— 顶层直接就是上面这些字段，不会再包一层 `command`。
+> 接收端三种形态都认：平铺、`{"type":"command","command":{...}}` 信封、
+> 以及没有 `type` 但有 `name` 的裸指令。
+> 另：`{"image": "<base64>", "name": "标签"}` 仍然是合法的推图格式，
+> 服务端会优先当图片处理 —— `name` 不会误触发指令。
+>
+> 指令日志 / 执行回执只发到网页端，推送端只会收到真正要执行的指令。
 
 ### 路由规则
 
