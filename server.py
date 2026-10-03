@@ -610,10 +610,16 @@ class MoyuServer:
         raw_name = (request.query.get("client") or request.query.get("name") or "").strip()
         name = clean_client_name(raw_name, f"ComfyUI-{uuid.uuid4().hex[:4]}")
 
+        # 关键：允许客户端自报 id（如油猴脚本用 localStorage 生成的稳定 clientId）。
+        # 不这么做的话服务端分配的 id 与客户端自认的 id 不一致，
+        # 指令的 to 定向投递会在客户端侧被过滤掉 —— 表现为「已送达但没反应」。
+        raw_cid = (request.query.get("clientId") or request.query.get("cid") or "").strip()
+        cid = re.sub(r"[^A-Za-z0-9_\-]", "", raw_cid)[:32] or uuid.uuid4().hex[:8]
+
         # 同名连接视为重连顶替，旧连接登记移除，避免列表出现重复条目
         stale = self.hub.find(name)
         info = ClientInfo(
-            id=uuid.uuid4().hex[:8],
+            id=cid,
             name=name,
             kind="sender",
             ip=peer,

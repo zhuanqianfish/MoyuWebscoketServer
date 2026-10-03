@@ -38,7 +38,7 @@ python server.py --open-browser
 python tools/test_client.py --count 5 --interval 1
 ```
 
-自检（共 236 项）：
+自检（共 254 项）：
 
 ```bash
 python tools/verify.py            # 后端 17 项：HTTP + WebSocket + 落盘一致性
@@ -46,6 +46,7 @@ python tools/verify_clients.py    # 客户端列表 29 项：登记/注销/计�
 python tools/verify_command.py    # 指令功能 56 项：转发/服务端执行/工作流指令
 node tools/verify_frontend.js     # 前端 105 项：渲染/排序/灯箱/客户端面板/Tab/指令面板
 node tools/verify_ws_reuse.js     # 连接复用 28 项：重连/排队/心跳（ComfyUI 场景）
+python tools/verify_bridge_client.py  # 油猴脚本链路 18 项：id 对齐/定向/回执
 ```
 
 ---
@@ -146,6 +147,18 @@ moyuDisconnect();                    // 一般不需要，除非想主动断开
 > 服务端会优先当图片处理 —— `name` 不会误触发指令。
 >
 > 指令日志 / 执行回执只发到网页端，推送端只会收到真正要执行的指令。
+
+**自定义客户端接入要点**（踩过坑）：
+
+1. **id 要两边对齐** —— 连接时带 `?client=<名字>&clientId=<你的稳定id>`，
+   服务端会沿用你自报的 id；否则「服务端按自己 id 投递 + 客户端按自报 id 过滤」
+   会变成静默丢弃。`welcome.client_id` 会回显服务端登记的 id。
+2. **必须回 `command_result`** —— 执行完（含失败）都要回，否则网页端
+   永远停在「等待回执…」。格式：
+   `{"type":"command_result","name":"...","from":["<你的id>"],"result":{"ok":true,"detail":"..."}}`
+3. **`to` 要双向兼容** —— 命中「自报 id」或「服务端 id」任一即执行。
+4. **控制台消息不要当指令** —— `type` 是字符串但没有 `name` 的消息
+   （`clients` / `command_log` / `ack`）是控制台通知，静默忽略即可。
 
 ### 路由规则
 
@@ -305,6 +318,8 @@ MoyuWebscoketServer/
 │   ├── verify_command.py    # 指令功能自检（56 项）
 │   ├── verify_frontend.js   # 前端逻辑离线校验（105 项，DOM 桩）
 │   ├── verify_ws_reuse.js   # 连接复用逻辑测试（28 项，桩 WebSocket）
+│   ├── verify_bridge_client.py  # 油猴脚本链路模拟（18 项）
+│   ├── probe_command.py   # 指令投递探针（排查客户端无响应）
 │   ├── gen_run_bat.py       # 字节级生成 run.bat（UTF-8 无 BOM + 全 CRLF）
 │   └── shot.js              # 无头 Chrome 截图（开发期核对 UI）
 └── saved_images/           # 图片落盘目录（自动创建）

@@ -60,6 +60,11 @@ ComfyUI 出图的中转站：**ComfyUI 推 base64 → Python 服务端解码落�
 - **排查指令无响应跑 `python tools/probe_command.py [id]`**：
   直接看客户端收没收到、回没回执。**先看 UA** ——
   `Mozilla/...` 是浏览器页面（油猴脚本）而非 ComfyUI 节点。
+- **客户端 id 必须两边对齐**：服务端支持 `?clientId=` 自报并沿用为登记 id，
+  否则「服务端按自己 id 投递 + 客户端按自报 id 过滤」= 静默丢弃。
+  油猴脚本的 `to` 命中判断要「自报 id 或服务端 id 任一命中」。
+- **写模拟客户端时 aiohttp `send_str` 必须 await**，
+  漏 await 只有一条 RuntimeWarning 警告，回执会静默丢失（极难排查）。
 - **网页是双 tab**：指令服务器（默认，`LS_TAB` 持久化）在前，推送图片在后。
   新 DOM id 必须同步加进 `tools/verify_frontend.js` 的 `IDS` 桩，否则测试炸。
 - **`.card` 类名已被图片卡片占用**，指令面板那几块要用 `.panel-box` /
@@ -81,10 +86,11 @@ python tools/verify_command.py          # 指令功能自检 56 项
 node tools/verify_frontend.js           # 前端自检 105 项（DOM 桩，免浏览器）
 node tools/verify_ws_reuse.js           # 连接复用自检 28 项（桩 WebSocket）
 node tools/shot.js 名称 [hash]          # 无头 Chrome 截图（核对 UI）
+python tools/verify_bridge_client.py    # 油猴脚本链路模拟（18 项）
 python tools/probe_command.py [id]      # 指令投递探针（排查客户端无响应）
 ```
 
-合计 236 项自检，改完代码应全绿。
+合计 254 项自检，改完代码应全绿。
 
 ## Git
 
