@@ -679,11 +679,6 @@ class MoyuServer:
             await self.hub.send(ws, {"type": "pong", "ts": time.time()})
             return
 
-        # 指令消息：转发给指定客户端，或在服务端执行
-        if payload.get("type") in ("command", "command_result"):
-            await self._route_command(ws, payload)
-            return
-
         b64 = (
             payload.get("image")
             or payload.get("images")
@@ -692,12 +687,26 @@ class MoyuServer:
         )
         if isinstance(b64, list):
             b64 = b64[0] if b64 else None
-        if not b64:
-            await self.hub.send(ws, {"type": "error", "message": "缺少 image 字段"})
+
+        # 先判推图 —— 推图允许用 name 当标签，所以「有 name」不能作为指令的唯一依据。
+        # 带图片的一律按推图处理。
+        if b64:
+            label = str(payload.get("label") or payload.get("name") or "")
+            await self._ingest_base64(ws, b64, peer, label=label)
             return
 
-        label = str(payload.get("label") or payload.get("name") or "")
-        await self._ingest_base64(ws, b64, peer, label=label)
+        # 指令消息：转发给指定客户端，或在服务端执行。
+        # 兼容平铺协议格式（顶层就有 name，无 type 字段）
+        if payload.get("type") in ("command", "command_result") or (
+            payload.get("name") is not None
+            or "command" in payload
+            or "result" in payload
+        ):
+            await self._route_command(ws, payload)
+            return
+
+        await self.hub.send(ws, {"type": "error", "message": "缺少 image 字段"})
+        return
 
     async def _on_binary(
         self, ws: web.WebSocketResponse, data: bytes, peer: str
@@ -809,6 +818,29 @@ class MoyuServer:
         return stats
 
     # --------------------------- 指令路由 --------------------------- #
+    async def _broadcast_to_web(self, payload: Dict[str, Any]) -> int:
+        """
+        只广播给网页端。
+
+        指令日志 / 回执这类控制台消息不应该流进推送端 ——
+        推送端只该收到真正要执行的指令。
+        """
+        text = json_dumps(payload)
+        targets = [ws for ws, info in self.hub._clients.items() if info.kind == "web"]
+        if not targets:
+            return 0
+
+        async def one(ws: web.WebSocketResponse) -> bool:
+            async with self.hub._lock_for(ws):
+                try:
+                    await ws.send_str(text)
+                    return True
+                except Exception:
+                    return False
+
+        results = await asyncio.gather(*(one(ws) for ws in targets), return_exceptions=True)
+        return sum(1 for r in results if r is True)
+
     @staticmethod
     def normalize_command(raw: Any) -> Dict[str, Any]:
         """
@@ -872,15 +904,22 @@ class MoyuServer:
         """
         sender_info = self.hub._clients.get(sender)
 
-        if payload.get("type") == "command_result":
+        if payload.get("type") == "command_result" or (
+            "result" in payload and "name" in payload
+        ):
             # 客户端回执：补上 ok 字段后转发给所有网页端（用于日志着色）
             result = payload.get("result")
             ok = bool(result.get("ok")) if isinstance(result, dict) else bool(payload.get("ok"))
             frm = payload.get("from")
-            await self.hub.broadcast(
+            # 指令体可能是平铺的（取 name/parameter/other/from/to）或信封的
+            inner = payload.get("command")
+            cmd = inner if isinstance(inner, dict) else {
+                k: payload.get(k) for k in ("name", "parameter", "other", "from", "to")
+            }
+            await self._broadcast_to_web(
                 {
                     "type": "command_result",
-                    "command": payload.get("command"),
+                    "command": cmd,
                     "result": result,
                     "ok": ok,
                     "from": frm[0] if isinstance(frm, list) and frm else frm,
@@ -888,7 +927,23 @@ class MoyuServer:
             )
             return
 
-        cmd = self.normalize_command(payload.get("command", payload))
+        # 兼容两种形态：
+        #   1) 平铺：{"name":..,"parameter":..,"other":..,"from":..,"to":..}（协议形态）
+        #   2) 信封：{"type":"command","command":{...}}（旧版前端/客户端）
+        # 另：type 为空但带 name 字段的，也按平铺指令处理
+        if payload.get("command") is not None and isinstance(payload.get("command"), dict):
+            cmd = self.normalize_command(payload["command"])
+        elif payload.get("name") is not None or not payload.get("type"):
+            cmd = self.normalize_command(payload)
+        else:
+            await self.hub.send(
+                sender,
+                {
+                    "type": "error",
+                    "message": "不是有效的指令：需要顶层 name 字段",
+                },
+            )
+            return
 
         # from 缺省时用发送者名字补上（本服务器发出时前端会显式给 "server"）
         if not cmd["from"]:
@@ -924,7 +979,9 @@ class MoyuServer:
             self.log(f"指令「{cmd['name'] or '(无名)'}」目标不在线：{targets}", "warn")
             return
 
-        frame = {"type": "command", "command": cmd}
+        # 协议要求顶层就有 name/parameter/other/from/to —— 不额外套信封。
+        # 额外挂一个 type=command 只为方便接收端快速筛选，不参与协议语义。
+        frame = {"type": "command", **cmd}
         delivered = 0
         for ws in sockets:
             if await self.hub.send(ws, frame):
@@ -938,7 +995,7 @@ class MoyuServer:
         self.log(
             f"指令「{cmd['name'] or '(无名)'}」已转发给 {delivered} 个客户端：{names}"
         )
-        # 回执给发送方（含实际送达名单），并同步一份给所有网页端做日志展示
+        # 回执给发送方（含实际送达名单）
         await self.hub.send(
             sender,
             {
@@ -948,7 +1005,8 @@ class MoyuServer:
                 "result": {"delivered": delivered, "targets": names},
             },
         )
-        await self.hub.broadcast(
+        # 日志只同步给网页端 —— 推送端只该收到指令本身，不该看到控制台日志
+        await self._broadcast_to_web(
             {
                 "type": "command_log",
                 "direction": "out",
@@ -989,7 +1047,7 @@ class MoyuServer:
             sender,
             {"type": "command_result", "ok": bool(result.get("ok")), "command": cmd, "result": result},
         )
-        await self.hub.broadcast(
+        await self._broadcast_to_web(
             {
                 "type": "command_log",
                 "direction": "exec",
@@ -1168,7 +1226,16 @@ class MoyuServer:
                             continue
                         if data.get("type") == "ping":
                             await self.hub.send(ws, {"type": "pong", "ts": time.time()})
-                        elif data.get("type") in ("command", "command_result"):
+                        elif data.get("type") in ("command", "command_result") or (
+                            # 平铺协议格式：没有 type，靠顶层 name / command / result 识别。
+                            # 带 image 的先排除 —— 推图允许用 name 当标签。
+                            not any(k in data for k in ("image", "images", "image_base64"))
+                            and (
+                                data.get("name") is not None
+                                or "command" in data
+                                or "result" in data
+                            )
+                        ):
                             await self._route_command(ws, data)
                 elif msg.type == WSMsgType.ERROR:
                     break

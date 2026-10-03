@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import sys
 from pathlib import Path
@@ -25,6 +26,7 @@ import aiohttp
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import server as S  # noqa: E402
+from test_client import make_test_png  # noqa: E402
 
 HTTP = "http://127.0.0.1:8801"
 PAGE = "ws://127.0.0.1:8801/ws"
@@ -117,7 +119,7 @@ async def main() -> int:
         got = await recv_until(snd, "command")
         check(got is not None, "推送端收到指令")
         if got:
-            g = got["command"]
+            g = got  # 平铺：指令字段直接在顶层
             check(g["name"] == "run_workflow", "name 一致", g["name"])
             check(g["from"] == ["server"], "from 为 server", str(g["from"]))
             check(g["parameter"] == {"workflow": {"nodes": []}}, "parameter 原样送达")
@@ -139,7 +141,7 @@ async def main() -> int:
             "command": {"name": "ping_client", "from": ["server"], "to": ["ComfyUI-测试"]},
         }))
         got = await recv_until(snd, "command")
-        check(got is not None, "按名字也能送达", got["command"]["name"] if got else "")
+        check(got is not None, "按名字也能送达", got.get("name", "") if got else "")
         await recv_until(web, "command_result")
 
         # ---------- 5. 不带 to → 服务端执行 ----------
@@ -217,11 +219,11 @@ async def main() -> int:
         }))
         got = await recv_until(web, "command")
         check(got is not None, "网页端收到客户端发来的指令")
-        check(got and got["command"]["name"] == "hello_page", "指令名正确")
+        check(got and got["name"] == "hello_page", "指令名正确")
         check(
-            got and got["command"]["from"] == ["ComfyUI-测试"],
+            got and got["from"] == ["ComfyUI-测试"],
             "from 标明了来源客户端",
-            str(got and got["command"]["from"]),
+            str(got and got["from"]),
         )
 
         # ---------- 10. 无 to 的客户端消息 → 服务端执行 ----------
@@ -241,7 +243,78 @@ async def main() -> int:
             str(res and res["result"]),
         )
 
-        # ---------- 11. 前端两个按钮的指令格式 ----------
+        # ---------- 11. 协议形态：顶层有 name，无信封 ---------- #
+        section("协议形态检查（顶层 name，无 command 信封）")
+        await web.send_str(json.dumps({
+            "name": "flat_cmd",
+            "parameter": {"a": 1},
+            "other": {},
+            "from": ["server"],
+            "to": [sender_id],
+        }))
+        got = await recv_until(snd, "command")
+        check(got is not None, "平铺格式的指令能被识别并送达")
+        check(got and "command" not in got, "下发时没有 command 信封",
+              str(list(got.keys())) if got else "")
+        check(got and got.get("name") == "flat_cmd", "顶层直接有 name", str(got and got.get("name")))
+        check(
+            got and got.get("from") == ["server"] and got.get("to") == [sender_id],
+            "from/to 也在顶层",
+            f"from={got and got.get('from')} to={got and got.get('to')}",
+        )
+        check(got and got.get("parameter") == {"a": 1}, "parameter 在顶层且原样送达")
+        check(got and got.get("type") == "command", "附带 type 供快速筛选")
+
+        # ---------- 12. 向后兼容：仍接受旧信封格式 ---------- #
+        section("兼容旧信封格式")
+        await web.send_str(json.dumps({
+            "type": "command",
+            "command": {"name": "legacy", "from": ["server"], "to": [sender_id]},
+        }))
+        got = await recv_until(snd, "command")
+        check(got is not None, "旧信封格式仍可用")
+        check(got and got.get("name") == "legacy", "信封内指令被正确取出")
+
+        # ---------- 13. 推送端不该收到控制台日志 ---------- #
+        section("日志隔离（推送端不收 command_log）")
+        while await recv_until(snd, "command_log", timeout=0.4):
+            pass
+        await web.send_str(json.dumps({
+            "name": "log_probe",
+            "from": ["server"],
+            "to": [sender_id],
+        }))
+        await recv_until(snd, "command")
+        await recv_until(web, "command_result")
+        leaked = await recv_until(snd, "command_log", timeout=2.0)
+        check(leaked is None, "推送端收不到 command_log 日志",
+              "泄漏: " + str(leaked) if leaked else "干净")
+        got = await recv_until(
+            web, "command_log",
+            pred=lambda d: d.get("command", {}).get("name") == "log_probe",
+        )
+        check(got is not None, "网页端能收到对应指令的 command_log")
+
+        # ---------- 14. 推图与指令不冲突（name 可当图片标签）---------- #
+        section("推图与指令共存（name 当标签不误判）")
+
+        async with s.get(f"{HTTP}/api/history?limit=200") as r:
+            before = len((await r.json())["items"])
+        # 这条同时有 image 和 name —— 必须按推图处理，不能当成指令
+        await snd.send_str(json.dumps({
+            "image": base64.b64encode(make_test_png(80, 60, seed=7)).decode(),
+            "name": "这是图片标签不是指令",
+        }))
+        await asyncio.sleep(1.2)
+        async with s.get(f"{HTTP}/api/history?limit=200") as r:
+            after = len((await r.json())["items"])
+        check(after == before + 1, "带 name 的推图被正确当作图片收下",
+              f"{before} → {after}")
+        # 不应产生任何指令回执/错误
+        stray = await recv_until(snd, "command_result", timeout=1.2)
+        check(stray is None, "推图没有误触发指令执行", str(stray) if stray else "无")
+
+        # ---------- 15. 前端两个按钮的指令格式 ---------- #
         section("工作流按钮下发的指令格式")
         cur = {
             "name": "run_current_workflow",
@@ -250,12 +323,12 @@ async def main() -> int:
             "from": ["server"],
             "to": [sender_id],
         }
-        await web.send_str(json.dumps({"type": "command", "command": cur}))
+        await web.send_str(json.dumps({"type": "command", **cur}))
         got = await recv_until(snd, "command")
         check(got is not None, "「运行当前工作流」指令送达")
-        check(got and got["command"]["name"] == "run_current_workflow", "指令名符合约定")
-        check(got and got["command"]["parameter"] == {}, "不携带工作流 JSON")
-        check(got and got["command"]["other"].get("source") == "current", "other 标记来源")
+        check(got and got["name"] == "run_current_workflow", "指令名符合约定")
+        check(got and got["parameter"] == {}, "不携带工作流 JSON")
+        check(got and got["other"].get("source") == "current", "other 标记来源")
 
         imp = {
             "name": "run_workflow",
@@ -264,11 +337,11 @@ async def main() -> int:
             "from": ["server"],
             "to": [sender_id],
         }
-        await web.send_str(json.dumps({"type": "command", "command": imp}))
+        await web.send_str(json.dumps({"type": "command", **imp}))
         got = await recv_until(snd, "command")
         check(got is not None, "「运行导入的工作流」指令送达")
-        check(got and got["command"]["parameter"]["workflow"]["nodes"], "携带了工作流内容")
-        check(got and got["command"]["other"].get("source") == "imported", "other 标记来源")
+        check(got and got["parameter"]["workflow"]["nodes"], "携带了工作流内容")
+        check(got and got["other"].get("source") == "imported", "other 标记来源")
 
         # ---------- 清理 ----------
         await web.close()

@@ -55,14 +55,20 @@ const KEY = '__moyuWsManager';
 /**
  * 接收服务端/其他客户端下发的指令。
  *
+ * 兼容两种形态：
+ *   1) 平铺（协议形态）：{ name, parameter, other, from, to }
+ *   2) 信封（旧版）：    { type:'command', command:{ name, ... } }
+ *
  * 内置支持两个与工作流相关的指令：
  *   run_current_workflow —— 直接执行当前画布上的工作流
  *   run_workflow         —— 先载入 parameter.workflow，再执行
  *
  * 其余指令名走 moyuCommandRegistry，方便你自己注册处理函数。
  */
-function handleCommand(ws, cmd) {
-    if (!cmd || typeof cmd !== 'object') return;
+function handleCommand(ws, raw) {
+    if (!raw || typeof raw !== 'object') return;
+    const cmd = (raw.command && typeof raw.command === 'object') ? raw.command : raw;
+
     const name = cmd.name || '';
     const param = cmd.parameter || {};
     console.log(`[指令] 收到「${name}」 from=${JSON.stringify(cmd.from || [])}`);
@@ -99,7 +105,7 @@ function handleCommand(ws, cmd) {
 function replyCommand(ws, name, ok, detail) {
     safeSend(ws, JSON.stringify({
         type: 'command_result',
-        command: { name },
+        name,
         from: [CLIENT_NAME],
         result: { ok, detail: typeof detail === 'string' ? detail : JSON.stringify(detail) },
     }));
@@ -232,7 +238,11 @@ function openSocket(mgr) {
                 console.log('[WebSocket] 已顶替同名旧连接');
             }
         } else if (data.type === 'command') {
-            handleCommand(ws, data.command);
+            // 协议形态：指令字段平铺在顶层（name/parameter/other/from/to）
+            handleCommand(ws, data);
+        } else if (data.name) {
+            // 兜底：没有 type 但有 name，也当指令处理
+            handleCommand(ws, data);
         } else if (data.type === 'command_log') {
             // 服务端广播的指令日志，仅打印便于排查
             const c = data.command || {};

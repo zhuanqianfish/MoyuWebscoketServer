@@ -336,7 +336,9 @@ function sendCommand(cmd) {
     return;
   }
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-    state.ws.send(JSON.stringify({ type: 'command', command: cmd }));
+    // 平铺发送：顶层就是 name/parameter/other/from/to，
+    // 只挂一个 type 供接收端快速筛选，不套 command 信封
+    state.ws.send(JSON.stringify({ type: 'command', ...cmd }));
   } else {
     toast('未连接到服务端', 'err');
   }

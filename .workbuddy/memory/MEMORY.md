@@ -47,6 +47,13 @@ ComfyUI 出图的中转站：**ComfyUI 推 base64 → Python 服务端解码落�
   （`Broadcaster.resolve` 先按 id、再按名字）；不带 `to` → 走服务端内置指令
   （`_server_commands`：ping/echo/stats/clients/history/broadcast）。
   未知指令与目标不在线都明确回 `ok:false`，不静默失败。
+- **指令下发必须是平铺格式**：`{"type":"command", **cmd}`，
+  顶层直接是 `name/parameter/other/from/to`，**不要套 `command` 信封**。
+  接收端三种形态都认（平铺 / 旧信封 / 无 type 但有 name）。
+- **推图和指令抢 `name` 字段**：`{"image":..., "name":"标签"}` 是合法推图格式。
+  `_on_text` 里**必须先判 b64 再判指令**，否则推图会被误判成指令。
+- **`command_log` / `command_result` 只发网页端**（`_broadcast_to_web`）——
+  推送端只该收到要执行的指令，日志流进指令通道会被误解析。
 - **网页是双 tab**：指令服务器（默认，`LS_TAB` 持久化）在前，推送图片在后。
   新 DOM id 必须同步加进 `tools/verify_frontend.js` 的 `IDS` 桩，否则测试炸。
 - **`.card` 类名已被图片卡片占用**，指令面板那几块要用 `.panel-box` /
@@ -64,13 +71,13 @@ python server.py --port 9001      # 换端口（记得同步 clientExample.js）
 python tools/test_client.py --count 5   # 模拟 ComfyUI 推图
 python tools/verify.py                  # 后端自检 17 项
 python tools/verify_clients.py          # 客户端列表自检 29 项
-python tools/verify_command.py          # 指令功能自检 44 项
+python tools/verify_command.py          # 指令功能自检 56 项
 node tools/verify_frontend.js           # 前端自检 99 项（DOM 桩，免浏览器）
 node tools/verify_ws_reuse.js           # 连接复用自检 28 项（桩 WebSocket）
 node tools/shot.js 名称 [hash]          # 无头 Chrome 截图（核对 UI）
 ```
 
-合计 217 项自检，改完代码应全绿。
+合计 229 项自检，改完代码应全绿。
 
 ## Git
 
