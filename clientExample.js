@@ -35,7 +35,7 @@
 
 // ===================== 连接配置 =====================
 const HOST = '127.0.0.1';
-const PORT = 8001;
+const PORT = 8801;
 
 // 客户端标识：服务端会在网页端「已连接客户端」列表里显示这个名字
 const CLIENT_NAME = 'ComfyUI';
@@ -49,6 +49,86 @@ const RETRY_STEPS = [1000, 2000, 4000, 8000, 15000];
 // 全局键名。挂到 globalThis 是因为 ComfyUI 每次都会重新执行本脚本，
 // 只有 globalThis 上的属性能跨次执行存活。
 const KEY = '__moyuWsManager';
+
+// ===================== 指令处理（ComfyUI 侧） =====================
+
+/**
+ * 接收服务端/其他客户端下发的指令。
+ *
+ * 内置支持两个与工作流相关的指令：
+ *   run_current_workflow —— 直接执行当前画布上的工作流
+ *   run_workflow         —— 先载入 parameter.workflow，再执行
+ *
+ * 其余指令名走 moyuCommandRegistry，方便你自己注册处理函数。
+ */
+function handleCommand(ws, cmd) {
+    if (!cmd || typeof cmd !== 'object') return;
+    const name = cmd.name || '';
+    const param = cmd.parameter || {};
+    console.log(`[指令] 收到「${name}」 from=${JSON.stringify(cmd.from || [])}`);
+
+    // 回执：让网页端的指令日志能看到执行结果
+    replyCommand(ws, name, true, '已接收');
+
+    try {
+        switch (name) {
+            case 'run_current_workflow':
+                runCurrentWorkflow();
+                break;
+            case 'run_workflow':
+                runWorkflow(param.workflow);
+                break;
+            default: {
+                const custom = moyuCommandRegistry[name];
+                if (typeof custom === 'function') {
+                    const r = custom(param, cmd);
+                    if (r && typeof r.then === 'function') r.then((v) => replyCommand(ws, name, true, v));
+                } else {
+                    console.warn(`[指令] 未识别的指令：${name}`);
+                    replyCommand(ws, name, false, `未识别的指令：${name}`);
+                }
+            }
+        }
+    } catch (err) {
+        console.error(`[指令] 执行失败：`, err);
+        replyCommand(ws, name, false, String(err && err.message ? err.message : err));
+    }
+}
+
+/** 把执行结果回传给服务端（会转发到网页端日志） */
+function replyCommand(ws, name, ok, detail) {
+    safeSend(ws, JSON.stringify({
+        type: 'command_result',
+        command: { name },
+        from: [CLIENT_NAME],
+        result: { ok, detail: typeof detail === 'string' ? detail : JSON.stringify(detail) },
+    }));
+}
+
+/** 执行当前画布上的工作流 */
+function runCurrentWorkflow() {
+    if (typeof app === 'undefined' || !app.queuePrompt) {
+        throw new Error('当前环境没有 ComfyUI app 对象，无法执行工作流');
+    }
+    app.queuePrompt(0, 1);
+    console.log('[指令] 已执行当前工作流');
+}
+
+/** 载入并执行指定工作流 JSON */
+function runWorkflow(workflow) {
+    if (typeof app === 'undefined' || !app.loadGraphData) {
+        throw new Error('当前环境没有 ComfyUI app 对象，无法载入工作流');
+    }
+    if (!workflow || typeof workflow !== 'object') {
+        throw new Error('parameter.workflow 不是合法的工作流对象');
+    }
+    app.loadGraphData(workflow);
+    app.queuePrompt(0, 1);
+    console.log('[指令] 已载入并执行导入的工作流');
+}
+
+/** 用户自定义指令表：moyuCommandRegistry['my_cmd'] = (param, cmd) => '结果' */
+const moyuCommandRegistry = {};
 
 // ===================== 连接管理器（单例） =====================
 
@@ -151,6 +231,12 @@ function openSocket(mgr) {
             if (data.reused) {
                 console.log('[WebSocket] 已顶替同名旧连接');
             }
+        } else if (data.type === 'command') {
+            handleCommand(ws, data.command);
+        } else if (data.type === 'command_log') {
+            // 服务端广播的指令日志，仅打印便于排查
+            const c = data.command || {};
+            console.log(`[指令] ${c.name || '(无名)'}`, data);
         }
     };
 
@@ -376,6 +462,10 @@ Object.assign(globalThis, {
     moyuSendFrom,
     moyuDisconnect,
     moyuStatus,
+    moyuCommandRegistry,
+    handleCommand,
+    runCurrentWorkflow,
+    runWorkflow,
 });
 
 })();

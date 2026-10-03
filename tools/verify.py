@@ -2,7 +2,7 @@
 """
 端到端链路自检脚本：验证 HTTP 接口 + WebSocket 广播是否全部正常。
 
-用法：python tools/verify.py [http://127.0.0.1:8080]
+用法：python tools/verify.py [http://127.0.0.1:8801]
 """
 
 from __future__ import annotations
@@ -32,13 +32,25 @@ async def main(base: str) -> int:
     parts = urlsplit(base)
     scheme = "wss" if parts.scheme == "https" else "ws"
     host = parts.hostname or "127.0.0.1"
-    ws_url = f"{scheme}://{host}:8001"               # 推送端
-    push_url = f"{scheme}://{host}:{parts.port}/ws"   # 网页端（同 HTTP 端口）
+    port = parts.port or 8801
+    ws_url = f"{scheme}://{host}:{port}/"          # 推送端（根路径）
+    push_url = f"{scheme}://{host}:{port}/ws"       # 网页端
 
     print(f"\n检查目标：{base}\n")
     print(f"  推送地址 {ws_url}\n  网页地址 {push_url}\n")
 
     async with aiohttp.ClientSession() as s:
+        # ---------- 准备：确保至少有 1 张图（历史是内存索引，重启后为空）----------
+        async with s.get(f"{base}/api/history?limit=1") as r:
+            if not (await r.json()).get("items"):
+                print("历史为空，先推送 1 张测试图…")
+                async with s.ws_connect(ws_url) as w:
+                    await w.send_str(json.dumps({
+                        "image": base64.b64encode(make_test_png(64, 64, seed=0)).decode(),
+                        "label": "verify-setup",
+                    }))
+                    await asyncio.sleep(0.5)
+
         # ---------- HTTP ----------
         print("【HTTP 接口】")
         for path, label in [
@@ -152,5 +164,5 @@ async def main(base: str) -> int:
 
 
 if __name__ == "__main__":
-    base = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8080"
+    base = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8801"
     raise SystemExit(asyncio.run(main(base.rstrip("/"))))

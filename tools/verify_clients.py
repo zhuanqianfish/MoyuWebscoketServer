@@ -24,9 +24,9 @@ import aiohttp
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from test_client import make_test_png  # noqa: E402
 
-HTTP = "http://127.0.0.1:8080"
-PUSH = "ws://127.0.0.1:8001"
-PAGE = "ws://127.0.0.1:8080/ws"
+HTTP = "http://127.0.0.1:8801"
+PUSH = "ws://127.0.0.1:8801/"
+PAGE = "ws://127.0.0.1:8801/ws"
 
 PASS, FAIL = "\033[92m✓\033[0m", "\033[91m✗\033[0m"
 results: list[tuple[bool, str, str]] = []

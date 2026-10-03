@@ -16,12 +16,14 @@ Moyu WebSocket Server
 
 默认端口：
 
-* ``8001`` —— WebSocket 服务（与 clientExample.js 中的 ``PORT`` 保持一致）
-* ``8080`` —— HTTP 网页服务（打开 http://127.0.0.1:8080 即可查看图片）
+* ``8801`` —— 单端口同时承载两种流量：
+    - WebSocket 推送：``ws://127.0.0.1:8801/``（ComfyUI 推图）
+    - 网页查看：``http://127.0.0.1:8801/web``（浏览器访问 ``/`` 会自动跳转）
+  网页客户端自身的 WebSocket 在 ``/ws`` 路径，与推送端同端口互不干扰。
 
 常用参数::
 
-    python server.py --ws-port 8001 --http-port 8080 --host 0.0.0.0
+    python server.py --port 8801 --host 0.0.0.0
     python server.py --save-dir D:/Pictures/moyu --no-save
 """
 
@@ -257,8 +259,7 @@ class ServerConfig:
     """运行期配置。"""
 
     host: str = "127.0.0.1"
-    ws_port: int = 8001
-    http_port: int = 8080
+    port: int = 8801  # 单端口：/ 推送 WS · /web 网页 · /ws 网页端 WS
     save_dir: Path = field(default_factory=lambda: Path(__file__).parent / "saved_images")
     auto_save: bool = True
     history_limit: int = DEFAULT_HISTORY_LIMIT
@@ -472,6 +473,26 @@ class Broadcaster:
     def count_send(self) -> int:
         return sum(1 for i in self._clients.values() if i.kind == "sender")
 
+    def resolve(self, keys: List[str]) -> List[web.WebSocketResponse]:
+        """
+        按 id 或名字解析目标连接（指令路由用）。
+
+        先按 id 精确匹配，未命中的再按名字匹配 —— 名字可匹配多个连接
+        （如两台都叫 ComfyUI 的机器），id 永远唯一，优先用。
+        """
+        wanted = [str(k).strip() for k in keys if str(k).strip()]
+        if not wanted:
+            return []
+        by_id: Dict[str, web.WebSocketResponse] = {
+            info.id: ws for ws, info in self._clients.items() if info.id in wanted
+        }
+        remaining = [k for k in wanted if k not in by_id]
+        out = list(by_id.values())
+        for ws, info in self._clients.items():
+            if info.name in remaining and ws not in out:
+                out.append(ws)
+        return out
+
     async def add(
         self,
         ws: web.WebSocketResponse,
@@ -583,7 +604,7 @@ class MoyuServer:
 
         peer = request.remote or "unknown"
 
-        # 允许推送端在 URL 上带 name / client 标识自己：ws://host:8001?client=ComfyUI-01
+        # 允许推送端在 URL 上带 name / client 标识自己：ws://host:8801?client=ComfyUI-01
         raw_name = (request.query.get("client") or request.query.get("name") or "").strip()
         name = clean_client_name(raw_name, f"ComfyUI-{uuid.uuid4().hex[:4]}")
 
@@ -656,6 +677,11 @@ class MoyuServer:
         # 心跳
         if payload.get("type") == "ping":
             await self.hub.send(ws, {"type": "pong", "ts": time.time()})
+            return
+
+        # 指令消息：转发给指定客户端，或在服务端执行
+        if payload.get("type") in ("command", "command_result"):
+            await self._route_command(ws, payload)
             return
 
         b64 = (
@@ -782,6 +808,239 @@ class MoyuServer:
         stats.update(self.hub.stats_payload())
         return stats
 
+    # --------------------------- 指令路由 --------------------------- #
+    @staticmethod
+    def normalize_command(raw: Any) -> Dict[str, Any]:
+        """
+        把指令规范成统一结构::
+
+            {"name": str, "parameter": {}, "other": {}, "from": [...], "to": [...]}
+
+        容错：from/to 允许字符串或数组；parameter/other 允许字符串（尝试解析 JSON）。
+        """
+        cmd: Dict[str, Any] = {
+            "name": "",
+            "parameter": {},
+            "other": {},
+            "from": [],
+            "to": [],
+        }
+        if not isinstance(raw, dict):
+            if isinstance(raw, str) and raw.strip():
+                with contextlib.suppress(json.JSONDecodeError):
+                    raw = json.loads(raw)
+            if not isinstance(raw, dict):
+                cmd["name"] = str(raw or "")[:120]
+                return cmd
+
+        cmd["name"] = str(raw.get("name") or "")[:120]
+
+        for key in ("parameter", "other"):
+            val = raw.get(key)
+            if isinstance(val, str):
+                with contextlib.suppress(json.JSONDecodeError):
+                    val = json.loads(val)
+            if val is None:
+                val = {}
+            if not isinstance(val, dict):
+                val = {"value": val}
+            cmd[key] = val
+
+        for key in ("from", "to"):
+            val = raw.get(key)
+            if val is None or val == "":
+                cmd[key] = []
+            elif isinstance(val, str):
+                cmd[key] = [val]
+            elif isinstance(val, (list, tuple)):
+                cmd[key] = [str(v) for v in val if str(v).strip()]
+            else:
+                cmd[key] = [str(val)]
+
+        return cmd
+
+    async def _route_command(
+        self, sender: web.WebSocketResponse, payload: Dict[str, Any]
+    ) -> None:
+        """
+        指令路由。
+
+        * ``command_result`` —— 客户端回执，仅记录日志并转发给网页端展示
+        * ``command``：
+            - 带 ``to`` → 转发给指定客户端（to 可填 id 或名字）
+            - 不带 ``to`` → 在服务端执行（内置指令 / 可扩展处理器）
+        """
+        sender_info = self.hub._clients.get(sender)
+
+        if payload.get("type") == "command_result":
+            # 客户端回执：补上 ok 字段后转发给所有网页端（用于日志着色）
+            result = payload.get("result")
+            ok = bool(result.get("ok")) if isinstance(result, dict) else bool(payload.get("ok"))
+            frm = payload.get("from")
+            await self.hub.broadcast(
+                {
+                    "type": "command_result",
+                    "command": payload.get("command"),
+                    "result": result,
+                    "ok": ok,
+                    "from": frm[0] if isinstance(frm, list) and frm else frm,
+                }
+            )
+            return
+
+        cmd = self.normalize_command(payload.get("command", payload))
+
+        # from 缺省时用发送者名字补上（本服务器发出时前端会显式给 "server"）
+        if not cmd["from"]:
+            if sender_info is not None:
+                cmd["from"] = [sender_info.id]
+            else:
+                cmd["from"] = ["server"]
+
+        targets = cmd["to"]
+        if targets:
+            await self._forward_command(sender, cmd, targets)
+        else:
+            await self._exec_server_command(sender, cmd)
+
+    async def _forward_command(
+        self,
+        sender: web.WebSocketResponse,
+        cmd: Dict[str, Any],
+        targets: List[str],
+    ) -> None:
+        """把指令转发给指定客户端。"""
+        sockets = self.hub.resolve(targets)
+        if not sockets:
+            await self.hub.send(
+                sender,
+                {
+                    "type": "command_result",
+                    "ok": False,
+                    "command": cmd,
+                    "result": {"error": f"目标客户端不在线：{targets}"},
+                },
+            )
+            self.log(f"指令「{cmd['name'] or '(无名)'}」目标不在线：{targets}", "warn")
+            return
+
+        frame = {"type": "command", "command": cmd}
+        delivered = 0
+        for ws in sockets:
+            if await self.hub.send(ws, frame):
+                delivered += 1
+
+        names = [
+            self.hub._clients[ws].name
+            for ws in sockets
+            if ws in self.hub._clients
+        ]
+        self.log(
+            f"指令「{cmd['name'] or '(无名)'}」已转发给 {delivered} 个客户端：{names}"
+        )
+        # 回执给发送方（含实际送达名单），并同步一份给所有网页端做日志展示
+        await self.hub.send(
+            sender,
+            {
+                "type": "command_result",
+                "ok": True,
+                "command": cmd,
+                "result": {"delivered": delivered, "targets": names},
+            },
+        )
+        await self.hub.broadcast(
+            {
+                "type": "command_log",
+                "direction": "out",
+                "command": cmd,
+                "delivered": delivered,
+                "targets": names,
+            }
+        )
+
+    async def _exec_server_command(
+        self, sender: web.WebSocketResponse, cmd: Dict[str, Any]
+    ) -> None:
+        """
+        在服务端执行指令（消息不带 ``to`` 时）。
+
+        内置指令见 ``_SERVER_COMMANDS``；未注册的指令名会回一个明确的错误，
+        避免静默失败。执行结果回给发送方并广播给网页端日志。
+        """
+        name = cmd["name"].strip()
+        handler = self._server_commands.get(name)
+        if handler is None:
+            result: Dict[str, Any] = {
+                "ok": False,
+                "error": f"未知服务端指令：{name or '(空)'}",
+                "available": sorted(self._server_commands),
+            }
+            self.log(f"未知服务端指令：{name!r}", "warn")
+        else:
+            try:
+                result = await handler(cmd)
+                result = {"ok": True, **result}
+                self.log(f"服务端指令「{name}」执行完成")
+            except Exception as exc:  # 指令异常不应拖垮连接
+                result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                self.log(f"服务端指令「{name}」执行出错：{exc}", "error")
+
+        await self.hub.send(
+            sender,
+            {"type": "command_result", "ok": bool(result.get("ok")), "command": cmd, "result": result},
+        )
+        await self.hub.broadcast(
+            {
+                "type": "command_log",
+                "direction": "exec",
+                "command": cmd,
+                "result": result,
+            }
+        )
+
+    # --------------------------- 内置服务端指令 --------------------------- #
+    async def _cmd_ping(self, cmd: Dict[str, Any]) -> Dict[str, Any]:
+        return {"pong": True, "ts": time.time()}
+
+    async def _cmd_echo(self, cmd: Dict[str, Any]) -> Dict[str, Any]:
+        return {"echo": cmd["parameter"], "other": cmd["other"]}
+
+    async def _cmd_stats(self, cmd: Dict[str, Any]) -> Dict[str, Any]:
+        return {"stats": self._stats_payload()}
+
+    async def _cmd_clients(self, cmd: Dict[str, Any]) -> Dict[str, Any]:
+        return {"clients": self.hub.snapshot()}
+
+    async def _cmd_history(self, cmd: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            limit = int(cmd["parameter"].get("limit", 20))
+        except (TypeError, ValueError):
+            limit = 20
+        limit = max(1, min(limit, self.cfg.history_limit))
+        return {
+            "items": [r.to_dict() for r in self.store.records()[:limit]],
+            "stats": self._stats_payload(),
+        }
+
+    async def _cmd_broadcast(self, cmd: Dict[str, Any]) -> Dict[str, Any]:
+        """把任意 payload 广播给所有客户端（调试用）。"""
+        payload = cmd["parameter"].get("payload")
+        if not isinstance(payload, dict):
+            return {"error": "parameter.payload 必须是 JSON 对象"}
+        n = await self.hub.broadcast(payload)
+        return {"delivered": n}
+
+    @property
+    def _server_commands(self) -> Dict[str, Any]:
+        return {
+            "ping": self._cmd_ping,
+            "echo": self._cmd_echo,
+            "stats": self._cmd_stats,
+            "clients": self._cmd_clients,
+            "history": self._cmd_history,
+            "broadcast": self._cmd_broadcast,
+        }
+
     async def http_index(self, request: web.Request) -> web.StreamResponse:
         index = self._web_root() / "index.html"
         if not index.exists():
@@ -905,8 +1164,12 @@ class MoyuServer:
                 if msg.type == WSMsgType.TEXT:
                     with contextlib.suppress(json.JSONDecodeError):
                         data = json.loads(msg.data)
-                        if isinstance(data, dict) and data.get("type") == "ping":
+                        if not isinstance(data, dict):
+                            continue
+                        if data.get("type") == "ping":
                             await self.hub.send(ws, {"type": "pong", "ts": time.time()})
+                        elif data.get("type") in ("command", "command_result"):
+                            await self._route_command(ws, data)
                 elif msg.type == WSMsgType.ERROR:
                     break
         finally:
@@ -918,7 +1181,11 @@ class MoyuServer:
 
     def build_http_app(self) -> web.Application:
         app = web.Application()
-        app.router.add_get("/", self.http_index)
+
+        # 根路径双职责：WebSocket 升级 = 推送端（clientExample.js 连 ws://host:port/）；
+        # 普通浏览器请求 = 302 到 /web
+        app.router.add_get("/", self.root_route)
+        app.router.add_get("/web", self.http_index)
         app.router.add_get("/api/history", self.api_history)
         app.router.add_get("/api/stats", self.api_stats)
         app.router.add_get("/api/clients", self.api_clients)
@@ -944,31 +1211,33 @@ class MoyuServer:
         app.router.add_route("GET", "/{tail:.*}", spa_fallback)
         return app
 
-    def build_ws_app(self) -> web.Application:
-        app = web.Application()
-        # 兼容 clientExample.js 里 ws://127.0.0.1:8001 的根路径
-        app.router.add_get("/", self.ws_handler)
-        app.router.add_get("/ws", self.ws_handler)
-        return app
+    async def root_route(self, request: web.Request) -> web.StreamResponse:
+        """
+        根路径双职责（单端口 8801 的关键）：
+
+        * ``Upgrade: websocket`` 头 → 交给推送端处理器（clientExample.js 连根路径）
+        * 普通浏览器请求 → 302 跳转到 /web
+        """
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            return await self.ws_handler(request)
+        raise web.HTTPFound("/web")
 
     # ----------------------------- 启动 ----------------------------- #
     async def run(self) -> None:
-        ws_app = self.build_ws_app()
-        http_app = self.build_http_app()
-        self._apps = [ws_app, http_app]
+        app = self.build_http_app()
+        self._apps = [app]
 
         runners: List[web.AppRunner] = []
         try:
-            for app, port, name in (
-                (ws_app, self.cfg.ws_port, "WebSocket"),
-                (http_app, self.cfg.http_port, "HTTP"),
-            ):
-                runner = web.AppRunner(app, access_log=None)
-                await runner.setup()
-                site = web.TCPSite(runner, self.cfg.host, port, reuse_address=True)
-                await site.start()
-                runners.append(runner)
-                self.log(f"{name} 服务已启动：ws/http://{self.cfg.host}:{port}")
+            runner = web.AppRunner(app, access_log=None)
+            await runner.setup()
+            site = web.TCPSite(runner, self.cfg.host, self.cfg.port, reuse_address=True)
+            await site.start()
+            runners.append(runner)
+            self.log(
+                f"服务已启动：http://{self.cfg.host}:{self.cfg.port}/web"
+                f"（推送 ws://{self.cfg.host}:{self.cfg.port}/）"
+            )
 
             if self.store.enabled:
                 self.log(f"图片保存目录：{self.cfg.save_dir}")
@@ -980,7 +1249,9 @@ class MoyuServer:
             if self.cfg.open_browser:
                 import webbrowser
 
-                webbrowser.open(f"http://{_local_host(self.cfg.host)}:{self.cfg.http_port}/")
+                webbrowser.open(
+                    f"http://{_local_host(self.cfg.host)}:{self.cfg.port}/web"
+                )
 
             stop = asyncio.Event()
             loop = asyncio.get_running_loop()
@@ -1000,8 +1271,8 @@ class MoyuServer:
         print("  ╔══════════════════════════════════════════════╗", flush=True)
         print(f"  ║   {APP_NAME}  v{VERSION:<28} ║", flush=True)
         print("  ╚══════════════════════════════════════════════╝", flush=True)
-        print(f"    网页查看   : http://{host}:{self.cfg.http_port}/", flush=True)
-        print(f"    推送地址   : ws://{host}:{self.cfg.ws_port}", flush=True)
+        print(f"    网页查看   : http://{host}:{self.cfg.port}/web", flush=True)
+        print(f"    推送地址   : ws://{host}:{self.cfg.port}/", flush=True)
         print(f"    局域网访问 : 把 {host} 换成本机内网 IP", flush=True)
         print("    按 Ctrl+C 停止服务", flush=True)
         print("", flush=True)
@@ -1022,8 +1293,15 @@ def parse_args(argv: Optional[List[str]] = None) -> ServerConfig:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--host", default="127.0.0.1", help="监听地址，局域网访问用 0.0.0.0")
-    parser.add_argument("--ws-port", type=int, default=8001, help="WebSocket 端口")
-    parser.add_argument("--http-port", type=int, default=8080, help="网页 HTTP 端口")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8801,
+        help="服务端口（推送 ws://host:port/ 与网页 http://host:port/web 共用）",
+    )
+    # 旧版双端口参数：保留兼容但不再生效（已合并为单端口）
+    parser.add_argument("--ws-port", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--http-port", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--save-dir", default=str(base / "saved_images"), help="图片保存目录"
     )
@@ -1042,10 +1320,15 @@ def parse_args(argv: Optional[List[str]] = None) -> ServerConfig:
     parser.add_argument("--open-browser", action="store_true", help="启动后自动打开网页")
     args = parser.parse_args(argv)
 
+    if args.ws_port is not None or args.http_port is not None:
+        print(
+            "[提示] 旧版 --ws-port / --http-port 已合并为单端口 --port，本次忽略。",
+            flush=True,
+        )
+
     return ServerConfig(
         host=args.host,
-        ws_port=args.ws_port,
-        http_port=args.http_port,
+        port=max(1, args.port),
         save_dir=Path(args.save_dir).expanduser().resolve(),
         auto_save=not args.no_save,
         history_limit=max(1, args.history_limit),

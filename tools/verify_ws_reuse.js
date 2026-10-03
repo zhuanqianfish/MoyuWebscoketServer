@@ -207,7 +207,7 @@ vm.runInContext("globalThis.__moyuWsManager.url = 'ws://127.0.0.1:9999';", sandb
 const cntBefore = created.length;
 vm.runInContext(`moyuSend('${B64}', 'newurl')`, sandbox);
 check(created.length === cntBefore + 1, 'URL 不匹配时新建连接', `created=${created.length}`);
-check(created[created.length - 1].url.includes(':8001'), '按脚本里的 URL 重建', created[created.length - 1].url);
+check(created[created.length - 1].url.includes(':8801'), '按脚本里的 URL 重建', created[created.length - 1].url);
 
 /* ===================================================== */
 console.log(`\n${'='.repeat(50)}`);

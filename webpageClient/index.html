@@ -68,39 +68,173 @@
   </div>
 </aside>
 
-<!-- ── 工具栏 ───────────────────────────────────────────── -->
-<main class="toolbar">
-  <div class="filters">
-    <button class="chip active" data-filter="all">全部</button>
-    <button class="chip" data-filter="live">仅新图</button>
-    <select class="select" id="sortMode" title="排序">
-      <option value="new">最新在前</option>
-      <option value="old">最早在前</option>
-      <option value="big">体积最大</option>
-    </select>
-  </div>
+<!-- ── Tab 栏 ───────────────────────────────────────────── -->
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="cmd">
+    <span class="tab-ico">⚡</span><span>指令服务器</span>
+    <span class="tab-badge" id="tabCmdBadge" hidden>0</span>
+  </button>
+  <button class="tab" data-tab="gallery">
+    <span class="tab-ico">🖼</span><span>推送图片</span>
+    <span class="tab-badge alt" id="tabImgBadge">0</span>
+  </button>
+</nav>
 
-  <div class="toolbar-actions">
-    <span class="muted" id="viewCount">—</span>
-    <button class="btn" id="btnSaveAll" title="打包下载全部可见图片 (ZIP)">⬇ 打包保存</button>
-    <button class="btn" id="btnClear" title="清空历史并删除文件">🗑 清空</button>
-    <button class="btn primary" id="btnPause" title="暂停自动滚动">⏸ 暂停接收</button>
-  </div>
+<!-- ══════════════════════════════════════════════════════ -->
+<!-- Tab 1 · 指令服务器（默认）                                  -->
+<!-- ══════════════════════════════════════════════════════ -->
+<main class="page page-cmd" id="pageCmd">
+
+  <!-- 左列：发送指令 -->
+  <section class="panel-box">
+    <div class="panel-head-c">
+      <h2>发送指令</h2>
+      <span class="panel-hint">发给指定客户端，或由服务端执行</span>
+    </div>
+
+    <div class="panel-body-c">
+      <label class="field">
+        <span class="field-label">指令名 name</span>
+        <input class="input" id="cmdName" placeholder="例如 run_workflow" autocomplete="off" />
+      </label>
+
+      <label class="field">
+        <span class="field-label">
+          parameter
+          <span class="field-tip">JSON 对象</span>
+        </span>
+        <textarea class="input mono" id="cmdParameter" rows="4" spellcheck="false">{}</textarea>
+      </label>
+
+      <label class="field">
+        <span class="field-label">
+          other
+          <span class="field-tip">JSON 对象，透传用</span>
+        </span>
+        <textarea class="input mono" id="cmdOther" rows="3" spellcheck="false">{}</textarea>
+      </label>
+
+      <div class="field">
+        <span class="field-label">
+          from
+          <span class="field-tip">本服务器发出的指令固定为 server</span>
+        </span>
+        <input class="input mono readonly" id="cmdFrom" value="server" readonly />
+      </div>
+
+      <div class="field">
+        <span class="field-label">
+          to
+          <span class="field-tip" id="cmdToCount">未选择客户端</span>
+        </span>
+        <div class="target-list" id="targetList">
+          <div class="target-empty">暂无其他客户端在线</div>
+        </div>
+        <div class="target-actions">
+          <button class="btn tiny" id="btnSelectAll">全选</button>
+          <button class="btn tiny" id="btnSelectNone">清空</button>
+        </div>
+      </div>
+
+      <details class="preview" id="cmdPreviewWrap">
+        <summary>预览 JSON</summary>
+        <pre class="preview-json mono" id="cmdPreview">{}</pre>
+      </details>
+    </div>
+
+    <div class="panel-foot-c">
+      <button class="btn primary" id="btnSendCmd">发送指令</button>
+      <button class="btn" id="btnExecServer" title="不填 to 时由服务端执行">仅服务端执行</button>
+    </div>
+  </section>
+
+  <!-- 右列：工作流 -->
+  <section class="panel-box">
+    <div class="panel-head-c">
+      <h2>工作流</h2>
+      <span class="panel-hint" id="wfStatus">未导入</span>
+    </div>
+
+    <div class="panel-body-c">
+      <div class="wf-actions">
+        <button class="btn" id="btnRunCurrent">▶ 运行当前工作流</button>
+        <button class="btn" id="btnRunImported">⏬ 运行导入的工作流</button>
+      </div>
+      <p class="wf-note">
+        「运行当前工作流」不携带 JSON，由客户端自己执行工作流；
+        「运行导入的工作流」会把下面的 JSON 一并下发。
+      </p>
+
+      <div class="wf-io">
+        <button class="btn tiny" id="btnWfImport">导入 JSON 文件</button>
+        <button class="btn tiny" id="btnWfFormat">格式化</button>
+        <button class="btn tiny" id="btnWfClear">清空</button>
+        <input type="file" id="wfFile" accept=".json,application/json" hidden />
+      </div>
+
+      <textarea class="input mono wf-editor" id="wfJson" rows="14"
+        spellcheck="false" placeholder="把 ComfyUI 工作流 JSON 粘贴到这里，或点「导入 JSON 文件」"></textarea>
+    </div>
+
+    <div class="panel-foot-c">
+      <span class="muted" id="wfMeta">—</span>
+    </div>
+  </section>
+
+  <!-- 指令日志 -->
+  <section class="panel-box span2">
+    <div class="panel-head-c">
+      <h2>指令日志</h2>
+      <div class="panel-head-actions">
+        <span class="panel-hint" id="cmdLogCount">0 条</span>
+        <button class="btn tiny" id="btnClearLog">清空</button>
+      </div>
+    </div>
+    <div class="cmd-log" id="cmdLog">
+      <div class="log-empty" id="logEmpty">还没有指令记录</div>
+    </div>
+  </section>
 </main>
 
-<!-- ── 图片墙 ───────────────────────────────────────────── -->
-<section class="gallery" id="gallery"></section>
+<!-- ══════════════════════════════════════════════════════ -->
+<!-- Tab 2 · 推送图片                                          -->
+<!-- ══════════════════════════════════════════════════════ -->
+<main class="page page-gallery" id="pageGallery" hidden>
 
-<!-- ── 空状态 ───────────────────────────────────────────── -->
-<div class="empty" id="empty">
-  <div class="empty-icon">📡</div>
-  <h2>等待 ComfyUI 推送图片</h2>
-  <p>在 ComfyUI 中运行 <code>clientExample.js</code> 里的发送代码，<br />图片会<b>立刻</b>出现在这里。</p>
-  <div class="empty-hint">
-    <span>推送地址：<code id="emptyWs">ws://…</code></span>
-    <span>查看地址：<code id="emptyHttp">http://…</code></span>
+  <!-- ── 工具栏 ─────────────────────────────────────────── -->
+  <div class="toolbar">
+    <div class="filters">
+      <button class="chip active" data-filter="all">全部</button>
+      <button class="chip" data-filter="live">仅新图</button>
+      <select class="select" id="sortMode" title="排序">
+        <option value="new">最新在前</option>
+        <option value="old">最早在前</option>
+        <option value="big">体积最大</option>
+      </select>
+    </div>
+
+    <div class="toolbar-actions">
+      <span class="muted" id="viewCount">—</span>
+      <button class="btn" id="btnSaveAll" title="打包下载全部可见图片 (ZIP)">⬇ 打包保存</button>
+      <button class="btn" id="btnClear" title="清空历史并删除文件">🗑 清空</button>
+      <button class="btn primary" id="btnPause" title="暂停自动滚动">⏸ 暂停接收</button>
+    </div>
   </div>
-</div>
+
+  <!-- ── 图片墙 ─────────────────────────────────────────── -->
+  <section class="gallery" id="gallery"></section>
+
+  <!-- ── 空状态 ─────────────────────────────────────────── -->
+  <div class="empty" id="empty">
+    <div class="empty-icon">📡</div>
+    <h2>等待 ComfyUI 推送图片</h2>
+    <p>在 ComfyUI 中运行 <code>clientExample.js</code> 里的发送代码，<br />图片会<b>立刻</b>出现在这里。</p>
+    <div class="empty-hint">
+      <span>推送地址：<code id="emptyWs">ws://…</code></span>
+      <span>查看地址：<code id="emptyHttp">http://…</code></span>
+    </div>
+  </div>
+</main>
 
 <!-- ── 灯箱 ─────────────────────────────────────────────── -->
 <div class="lightbox" id="lightbox" hidden>

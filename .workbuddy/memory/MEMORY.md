@@ -6,10 +6,17 @@ ComfyUI 出图的中转站：**ComfyUI 推 base64 → Python 服务端解码落�
 
 ## 端口约定
 
-| 端口 | 协议 | 用途 |
+**单端口 8801**，三种流量共用（换端口改 `--port` + `clientExample.js` 的 `PORT`）：
+
+| 路径 | 协议 | 用途 |
 |------|------|------|
-| 8001 | WebSocket | ComfyUI 推图。**与 `clientExample.js` 的 `PORT` 绑定，改端口要同步改该文件** |
-| 8080 | HTTP | 网页 UI + REST。网页端 WS 在同端口 `/ws` 路径 |
+| `/` | WebSocket | ComfyUI 推送端。**与 `clientExample.js` 的 `PORT` 绑定** |
+| `/web` | HTTP | 网页 UI（访问 `/` 会 302 到这里） |
+| `/ws` | WebSocket | 网页客户端自己的实时通道 |
+| `/api/*` `/media/*` `/download/*` | HTTP | 接口 / 图片 |
+
+单端口的实现：`/` 路由看 `Upgrade: websocket` 头分流 —— 是则交给推送处理器，
+否则 302 到 `/web`。两个 App 已合并成一个，旧的 `--ws-port`/`--http-port` 保留为隐藏兼容参数。
 
 ## 关键约定
 
@@ -36,39 +43,52 @@ ComfyUI 出图的中转站：**ComfyUI 推 base64 → Python 服务端解码落�
   `tools/gen_run_bat.py` 字节级生成（UTF-8 无 BOM + 全 CRLF），
   改启动脚本后跑 `tools/_check_bat.py` 体检 + `tools/_probe_bat.py` 真实验证。
   通用规则已记入用户级记忆（Windows 批处理编码铁律）。
+- **指令路由规则**（`MoyuServer._route_command`）：消息带 `to` → 转发给目标
+  （`Broadcaster.resolve` 先按 id、再按名字）；不带 `to` → 走服务端内置指令
+  （`_server_commands`：ping/echo/stats/clients/history/broadcast）。
+  未知指令与目标不在线都明确回 `ok:false`，不静默失败。
+- **网页是双 tab**：指令服务器（默认，`LS_TAB` 持久化）在前，推送图片在后。
+  新 DOM id 必须同步加进 `tools/verify_frontend.js` 的 `IDS` 桩，否则测试炸。
+- **`.card` 类名已被图片卡片占用**，指令面板那几块要用 `.panel-box` /
+  `.panel-head-c` / `.panel-body-c` / `.panel-foot-c`。
 
 ## 命令
 
 ```bash
 ./run.sh                    # macOS/Linux（会自动探测 .venv、装依赖）
 run.bat                     # Windows 双击
-python server.py            # 手动启动（8001 + 8080）
+python server.py            # 手动启动（8801 单端口）
 python server.py --host 0.0.0.0   # 局域网/手机访问
+python server.py --port 9001      # 换端口（记得同步 clientExample.js）
 
 python tools/test_client.py --count 5   # 模拟 ComfyUI 推图
 python tools/verify.py                  # 后端自检 17 项
 python tools/verify_clients.py          # 客户端列表自检 29 项
-node tools/verify_frontend.js           # 前端自检 53 项（DOM 桩，免浏览器）
+python tools/verify_command.py          # 指令功能自检 44 项
+node tools/verify_frontend.js           # 前端自检 99 项（DOM 桩，免浏览器）
 node tools/verify_ws_reuse.js           # 连接复用自检 28 项（桩 WebSocket）
+node tools/shot.js 名称 [hash]          # 无头 Chrome 截图（核对 UI）
 ```
 
-合计 127 项自检，改完代码应全绿。
+合计 217 项自检，改完代码应全绿。
 
 ## Git
 
 - 远程：`git@github.com:zhuanqianfish/MoyuWebscoketServer.git`（SSH，非 HTTPS）
 - 主分支 `main`，首次提交 `4e6db15 first commit`
-- `saved_images/`、`__pycache__`、`UI预览.png` 已由 `.gitignore` 排除
+- `saved_images/`、`__pycache__`、`UI预览.png`、临时截图已由 `.gitignore` 排除
 - 提交用 `git -c user.name="zhuanqianfish"` 显式指定（本地无全局 user.name 配置）
 - CRLF 警告是 Windows 正常现象，不影响
 
 ## 排查指引
 
 - 网页一直「连接中」→ 服务端窗口被关了；浏览器会自动重连，不用刷新
-- ComfyUI 连不上 → 8001 被占用，换端口后记得同步改 `clientExample.js`
+- ComfyUI 连不上 → 8801 被占用，换端口后记得同步改 `clientExample.js`
 - 跑多次后 ComfyUI 连不上 → 检查是不是用了每次 `new WebSocket()` 的旧写法
-- 手机连不上 → 必须 `--host 0.0.0.0` + 防火墙放行 8080
+- 手机连不上 → 必须 `--host 0.0.0.0` + 防火墙放行 8801
 - 刚连上就断 → 查是否有并发 `send_str`（aiohttp 硬限制，需按连接加锁）
+- 指令点了没反应 → 看指令日志 exec/err 条目；旧版 clientExample.js 不处理指令
+- `verify.py` 报 `IndexError` → 历史是内存索引，被清空过；已在脚本里自动补图
 
 ## 本机环境
 

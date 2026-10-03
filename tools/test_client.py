@@ -14,7 +14,7 @@
     python tools/test_client.py --count 5 --interval 1.5
 
     # 发送到自定义地址
-    python tools/test_client.py --host 192.168.1.10 --port 8001
+    python tools/test_client.py --host 192.168.1.10 --port 8801
 """
 
 from __future__ import annotations
@@ -147,7 +147,7 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description="模拟 ComfyUI 推送 base64 图片")
     parser.add_argument("images", nargs="*", help="要发送的图片文件")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8001)
+    parser.add_argument("--port", type=int, default=8801)
     parser.add_argument("--count", type=int, default=1, help="无图片参数时生成多少张")
     parser.add_argument("--interval", type=float, default=1.0, help="发送间隔（秒）")
     parser.add_argument("--width", type=int, default=768)
@@ -180,7 +180,7 @@ async def main() -> int:
                     await asyncio.sleep(args.interval)
 
     print(f"\n完成：成功 {ok_count} 张")
-    print(f"现在打开 http://{args.host}:8080 查看图片")
+    print(f"现在打开 http://{args.host}:{args.port}/web 查看图片")
     return 0 if ok_count else 1
 
 

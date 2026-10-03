@@ -18,3 +18,6 @@ UI预览.png
 .idea/
 .DS_Store
 Thumbs.db
+# 临时截图
+*.png
+!UI预览.png
