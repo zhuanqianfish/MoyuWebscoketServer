@@ -38,7 +38,7 @@ python server.py --open-browser
 python tools/test_client.py --count 5 --interval 1
 ```
 
-自检（共 218 项）：
+自检（共 229 项）：
 
 ```bash
 python tools/verify.py            # 后端 17 项：HTTP + WebSocket + 落盘一致性
