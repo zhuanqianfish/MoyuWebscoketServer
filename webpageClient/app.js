@@ -9,6 +9,7 @@ const MAX_CARDS = 500;          // 页面最多保留的卡片数
 const RECONNECT_STEPS = [800, 1600, 3000, 5000, 8000];
 const LS_PAUSED = 'moyu.paused';
 const LS_SOUND  = 'moyu.sound';
+const LS_NAME   = 'moyu.name';
 
 const state = {
   items: [],          // 全部图片记录（新→旧）
@@ -22,6 +23,9 @@ const state = {
   ws: null,
   retry: 0,
   freshCount: 0,
+  clients: [],        // 在线客户端列表
+  selfId: '',         // 服务端分配给本窗口的 ID
+  selfName: localStorage.getItem(LS_NAME) || '',
 };
 
 /* ── DOM ─────────────────────────────────────────────── */
@@ -29,11 +33,15 @@ const $ = (id) => document.getElementById(id);
 const el = {
   gallery: $('gallery'), empty: $('empty'), emptyWs: $('emptyWs'), emptyHttp: $('emptyHttp'),
   conn: $('conn'), connText: document.querySelector('#conn .conn-text'),
-  statImages: $('statImages'), statClients: $('statClients'),
+  statImages: $('statImages'), statClients: $('statClients'), statSenders: $('statSenders'),
   statSize: $('statSize'), statUptime: $('statUptime'),
   viewCount: $('viewCount'),
   btnPause: $('btnPause'), btnSound: $('btnSound'), soundIcon: $('soundIcon'),
   btnSaveAll: $('btnSaveAll'), btnClear: $('btnClear'),
+  btnClients: $('btnClients'), badgeClients: $('badgeClients'),
+  clientsPanel: $('clientsPanel'), panelBody: $('panelBody'),
+  panelCount: $('panelCount'), panelEmpty: $('panelEmpty'), panelClose: $('panelClose'),
+  selfName: $('selfName'), btnRename: $('btnRename'),
   lightbox: $('lightbox'), lbImg: $('lbImg'), lbTitle: $('lbTitle'), lbTags: $('lbTags'),
   lbClose: $('lbClose'), lbPrev: $('lbPrev'), lbNext: $('lbNext'),
   toasts: $('toasts'),
@@ -94,7 +102,9 @@ function ding() {
 /* ── WebSocket ───────────────────────────────────────── */
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = `${proto}//${location.host}/ws`;
+  // 把本窗口的名字带给服务端，便于在客户端列表里区分是谁
+  const q = state.selfName ? `?name=${encodeURIComponent(state.selfName)}` : '';
+  const url = `${proto}//${location.host}/ws${q}`;
   el.emptyWs.textContent = url;
   el.emptyHttp.textContent = location.origin;
 
@@ -148,6 +158,10 @@ function handleMessage(msg) {
     case 'hello':
     case 'welcome':
       applyStats(msg.stats);
+      // hello 里带 self_id，比按名字猜可靠
+      if (msg.self_id) state.selfId = msg.self_id;
+      if (msg.client_name) state.selfName = msg.client_name;
+      if (msg.clients) applyClients(msg.clients);
       if (Array.isArray(msg.items)) {
         let added = 0;
         msg.items.forEach((it) => { if (addItem(it, false)) added += 1; });
@@ -158,6 +172,13 @@ function handleMessage(msg) {
     case 'image':
       if (msg.record && addItem(msg.record, true)) render();
       applyStats(msg.stats);
+      if (msg.clients) applyClients(msg.clients);
+      break;
+
+    // 有人连上/断开，或推送计数变化
+    case 'clients':
+      applyStats(msg.stats);
+      applyClients(msg.clients);
       break;
 
     case 'removed':
@@ -223,9 +244,116 @@ function removeItem(id) {
 function applyStats(s) {
   if (!s) return;
   el.statImages.textContent = s.images ?? 0;
-  el.statClients.textContent = s.clients ?? 0;
+  el.statClients.textContent = s.clients ?? s.web_clients ?? 0;
+  el.statSenders.textContent = s.sender_clients ?? 0;
   el.statSize.textContent = fmtSize(s.bytes);
   el.statUptime.textContent = fmtUptime(s.uptime);
+}
+
+/* ── 在线客户端列表 ──────────────────────────────────── */
+function applyClients(list) {
+  if (!Array.isArray(list)) return;
+  state.clients = list;
+
+  // 兜底：若尚未从 hello 拿到 self_id，按名字认领
+  if (!state.selfId) {
+    const mine = list.find((c) => c.kind === 'web' && c.name === state.selfName);
+    if (mine) state.selfId = mine.id;
+  }
+
+  const others = list.length - 1;
+  el.badgeClients.textContent = list.length;
+  el.btnClients.classList.toggle('has-clients', others > 0);
+
+  renderClients();
+}
+
+function renderClients() {
+  const list = state.clients;
+  el.panelCount.textContent = list.length;
+  el.panelEmpty.style.display = list.length ? 'none' : '';
+
+  const frag = document.createDocumentFragment();
+  list.forEach((c) => {
+    const isSelf = c.id && c.id === state.selfId;
+    const row = document.createElement('div');
+    row.className = `cli ${c.kind}${isSelf ? ' self' : ''}`;
+
+    const avatar = document.createElement('div');
+    avatar.className = 'cli-avatar';
+    avatar.textContent = c.kind === 'sender' ? '🖥' : '🖼';
+    row.appendChild(avatar);
+
+    const main = document.createElement('div');
+    main.className = 'cli-main';
+
+    const nameRow = document.createElement('div');
+    nameRow.className = 'cli-name';
+    nameRow.append(escapeText(c.name || '未命名'));
+    if (isSelf) nameRow.appendChild(tag('我', 'web'));
+    else nameRow.appendChild(tag(c.kind === 'sender' ? '推送端' : '网页端', c.kind));
+    main.appendChild(nameRow);
+
+    const meta = document.createElement('div');
+    meta.className = 'cli-meta';
+    const secs = c.connected_seconds ?? 0;
+    meta.textContent = `${c.ip || '?'} · ${c.connected_at_text || ''} · 在线 ${fmtDuration(secs)}`;
+    main.appendChild(meta);
+
+    row.appendChild(main);
+
+    if (c.kind === 'sender') {
+      const sent = document.createElement('div');
+      sent.className = 'cli-sent';
+      const b = document.createElement('b');
+      b.textContent = c.sent ?? 0;
+      const sp = document.createElement('span');
+      sp.textContent = '已推送';
+      sent.append(b, sp);
+      row.appendChild(sent);
+    }
+
+    frag.appendChild(row);
+  });
+
+  el.panelBody.replaceChildren(frag);
+}
+
+function tag(text, kind) {
+  const s = document.createElement('span');
+  s.className = `cli-tag ${kind}`;
+  s.textContent = text;
+  return s;
+}
+
+function escapeText(t) {
+  return document.createTextNode(String(t ?? ''));
+}
+
+/** 秒数 → 「1分23秒」这类可读时长 */
+function fmtDuration(sec) {
+  const s = Math.max(0, Math.floor(sec || 0));
+  if (s < 60) return `${s} 秒`;
+  if (s < 3600) return `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
+  const h = Math.floor(s / 3600);
+  return `${h} 小时 ${Math.floor((s % 3600) / 60)} 分`;
+}
+
+function togglePanel(force) {
+  const show = force !== undefined ? force : el.clientsPanel.hidden;
+  el.clientsPanel.hidden = !show;
+  if (show) renderClients();
+}
+
+/** 改名 = 存本地 + 重连（名字走 URL query，服务端据此登记） */
+function renameSelf() {
+  const name = el.selfName.value.trim().slice(0, 24);
+  if (!name) { toast('名字不能为空', 'warn', 2000); return; }
+  state.selfName = name;
+  localStorage.setItem(LS_NAME, name);
+  if (state.ws && state.ws.readyState === WebSocket.OPEN) state.ws.close();
+  else connect();
+  toast(`已改名为「${name}」`, 'ok', 2000);
 }
 
 /* ── 渲染 ────────────────────────────────────────────── */
@@ -541,6 +669,17 @@ function bind() {
   el.btnSaveAll.addEventListener('click', saveAll);
   el.btnClear.addEventListener('click', clearAll);
 
+  // 客户端面板
+  el.btnClients.addEventListener('click', () => togglePanel());
+  el.panelClose.addEventListener('click', () => togglePanel(false));
+  el.btnRename.addEventListener('click', renameSelf);
+  el.selfName.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') renameSelf();
+  });
+
+  // 面板开合状态写进地址 hash，刷新后保持
+  if (location.hash === '#clients') togglePanel(true);
+
   // 灯箱
   el.lbClose.addEventListener('click', closeLightbox);
   el.lbPrev.addEventListener('click', (e) => { e.stopPropagation(); stepLightbox(-1); });
@@ -565,6 +704,7 @@ function bind() {
           d.items.forEach((it) => { if (addItem(it, false)) added += 1; });
           if (added) { render(); toast(`补齐了 ${added} 张图片`, 'info', 2200); }
         }
+        if (d && d.clients) applyClients(d.clients);
       }).catch(() => {});
     }
   });
@@ -585,6 +725,7 @@ function boot() {
   bind();
   syncPauseBtn();
   syncSoundBtn();
+  el.selfName.value = state.selfName;
   render();
   connect();
 
@@ -593,6 +734,7 @@ function boot() {
     if (document.hidden) return;
     fetch('/api/stats').then((r) => r.json()).then((d) => {
       if (d && d.stats) applyStats(d.stats);
+      if (d && d.clients) applyClients(d.clients);
     }).catch(() => {});
   }, 5000);
 

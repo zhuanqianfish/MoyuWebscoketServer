@@ -30,7 +30,8 @@
 
   <div class="stats" id="stats">
     <div class="stat"><b id="statImages">0</b><span>已收图片</span></div>
-    <div class="stat"><b id="statClients">0</b><span>在线窗口</span></div>
+    <div class="stat"><b id="statClients">0</b><span>网页窗口</span></div>
+    <div class="stat"><b id="statSenders">0</b><span>推送端</span></div>
     <div class="stat"><b id="statSize">0 B</b><span>占用空间</span></div>
     <div class="stat"><b id="statUptime">00:00</b><span>运行时长</span></div>
   </div>
@@ -40,11 +41,32 @@
       <span class="dot"></span>
       <span class="conn-text">连接中…</span>
     </div>
+    <button class="btn ghost" id="btnClients" title="查看已连接客户端">
+      <span>👥</span><span class="badge" id="badgeClients">0</span>
+    </button>
     <button class="btn ghost" id="btnSound" title="新图提示音">
       <span id="soundIcon">🔔</span>
     </button>
   </div>
 </header>
+
+<!-- ── 在线客户端面板 ───────────────────────────────────── -->
+<aside class="clients-panel" id="clientsPanel" hidden>
+  <div class="panel-head">
+    <h2>已连接客户端 <span class="panel-count" id="panelCount">0</span></h2>
+    <button class="icon-btn" id="panelClose" title="关闭">✕</button>
+  </div>
+
+  <div class="panel-body" id="panelBody">
+    <div class="panel-empty" id="panelEmpty">暂无其他客户端连接</div>
+  </div>
+
+  <div class="panel-foot">
+    <span class="muted">我的标识</span>
+    <input class="name-input" id="selfName" placeholder="给自己起个名字" maxlength="24" />
+    <button class="btn primary mini" id="btnRename">改名</button>
+  </div>
+</aside>
 
 <!-- ── 工具栏 ───────────────────────────────────────────── -->
 <main class="toolbar">

@@ -33,6 +33,14 @@ python tools/verify.py                    # 后端自检 17 项
 node tools/verify_frontend.js             # 前端自检 35 项（DOM 桩，免浏览器）
 ```
 
+## Git
+
+- 远程：`git@github.com:zhuanqianfish/MoyuWebscoketServer.git`（SSH，非 HTTPS）
+- 主分支 `main`，首次提交 `4e6db15 first commit`
+- `saved_images/`、`__pycache__`、`UI预览.png` 已由 `.gitignore` 排除
+- 提交用 `git -c user.name="zhuanqianfish"` 显式指定（本地无全局 user.name 配置）
+- CRLF 警告是 Windows 正常现象，不影响
+
 ## 排查指引
 
 - 网页一直「连接中」→ 服务端窗口被关了；浏览器会自动重连，不用刷新

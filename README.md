@@ -13,15 +13,21 @@ ComfyUI (clientExample.js)                Python 服务端                 网�
 
 ## 快速开始
 
+**Windows**：双击 `run.bat`
+
+**macOS / Linux**：
+
 ```bash
-# 1. 装依赖
+chmod +x run.sh && ./run.sh
+```
+
+两个脚本都会自动探测 Python、检查 `aiohttp` 依赖（缺了自动装）、提示端口占用，然后启动服务并打开浏览器。已有 `.venv` 会优先使用。
+
+也可以手动启动：
+
+```bash
 pip install -r requirements.txt
-
-# 2. 启动服务
-python server.py
-
-# 3. 浏览器打开
-#    http://127.0.0.1:8080
+python server.py --open-browser
 ```
 
 跑通整条链路（不用开 ComfyUI）：
@@ -30,11 +36,13 @@ python server.py
 python tools/test_client.py --count 5 --interval 1
 ```
 
-自检全部接口：
+自检：
 
 ```bash
 python tools/verify.py            # 后端 17 项：HTTP + WebSocket + 落盘一致性
-node tools/verify_frontend.js     # 前端 35 项：渲染 / 排序 / 灯箱 / 去重（DOM 桩，无需浏览器）
+python tools/verify_clients.py    # 客户端列表 29 项：登记/注销/计数/广播
+node tools/verify_frontend.js     # 前端 53 项：渲染 / 排序 / 灯箱 / 客户端面板
+node tools/verify_ws_reuse.js     # 连接复用 28 项：重连/排队/心跳（ComfyUI 场景）
 ```
 
 ---
@@ -59,7 +67,26 @@ const payload = JSON.stringify({ image: base64Data });
 new WebSocket('ws://127.0.0.1:8001').send(payload);
 ```
 
-服务端实际接受的情况比这更宽松：
+### 连接复用（重要）
+
+**反复运行工作流时不要每次 `new WebSocket()`。** 否则每次执行都要重新握手，
+连接频繁创建/关闭还会累积 TIME_WAIT，容易耗尽本地端口，失败噪音也会掩盖真正的错误。
+
+本仓库的 `clientExample.js` 已改成把连接挂在 `globalThis` 上做单例复用：
+
+- 连接已就绪 → 直接 `send`，零握手开销
+- 正在连接 → 消息排队，`open` 后自动补发（不丢图）
+- 异常断开 → 按 1s/2s/4s/8s/15s 退避自动重连
+- 20s 心跳保活
+
+```js
+// 脚本区域（可安全重复执行）
+moyuSend(base64Data, '可选标签');   // 发图，自动复用连接
+moyuStatus();                        // { state:'OPEN', reusedConnection:true, ... }
+moyuDisconnect();                    // 一般不需要，除非想主动断开
+```
+
+服务端接受的情况比标准用法更宽松：
 
 | 你发什么 | 服务端行为 |
 |----------|-----------|
@@ -79,8 +106,8 @@ new WebSocket('ws://127.0.0.1:8001').send(payload);
 {"type":"ack","ok":true,"filename":"20261003-我的图-a1b2.png","size":173995}
 ```
 
-> 建议：把 `label` 设成 ComfyUI 节点名（如 `"Image To Base64"`），
-> 网页端会用它当图片标题，比一串随机 ID 好认得多。
+> 建议：把 `label` 设成 ComfyUI 节点名（如 `"TextEncodeQwenImageEditPlus"`），
+> 网页端会用它当图片标题，也方便在客户端列表里区分是谁在推图。
 
 ---
 
@@ -95,9 +122,12 @@ new WebSocket('ws://127.0.0.1:8001').send(payload);
 - **保存图片** —— 悬停卡片点 `⬇` 单张下载
 - **打包保存** —— `⬇ 打包保存` 把当前可见图片打成 ZIP（浏览器本地生成，不占服务端内存）
 - **删除 / 清空** —— 同步删掉服务器上的文件
-- **状态栏** —— 已收张数、在线窗口数、占用空间、运行时长
+- **状态栏** —— 已收张数、网页窗口数、推送端数、占用空间、运行时长
+- **在线客户端列表** —— 点顶栏 `👥` 展开：谁在线、IP、连接时间、在线时长；推送端还显示已推图片数。自己的窗口标「我」，面板底部可改名
 - **连接状态** —— 断线自动重连（退避 0.8s → 8s），顶部圆点实时反映
 - **新图提示** —— Toast 通知 + WebAudio 合成提示音（可关）
+
+客户端名单在有人连上/断开、以及推送计数变化时自动实时更新。
 
 ---
 
@@ -138,11 +168,16 @@ python server.py --save-dir D:/Pictures/moyu --history-limit 100
 | GET | `/` | 网页 UI |
 | GET | `/api/history?limit=200` | 历史图片列表（元数据） |
 | GET | `/api/stats` | 统计信息 |
+| GET | `/api/clients` | 在线客户端列表 |
 | GET | `/media/{id}` | 图片内容（带长缓存） |
 | GET | `/download/{id}` | 下载图片（`Content-Disposition: attachment`） |
 | DELETE | `/api/history/{id}` | 删除单张（连文件一起删） |
 | POST | `/api/clear` | 清空全部历史 |
 | WS | `/ws` | 网页端实时推送 |
+| WS | `:8001` | ComfyUI 推送端（可用 `?client=名字` 自报身份） |
+
+`stats` 字段：`images` / `bytes` / `clients`（网页窗口） / `web_clients` /
+`sender_clients`（推送端） / `total_clients` / `uptime` / `saving` / `save_dir`。
 
 ---
 
@@ -150,18 +185,22 @@ python server.py --save-dir D:/Pictures/moyu --history-limit 100
 
 ```
 MoyuWebscoketServer/
-├── server.py               # 服务端主体（WS 收图 + HTTP 服务 + 图片仓库）
+├── server.py               # 服务端主体（WS 收图 + HTTP 服务 + 图片仓库 + 客户端登记）
+├── run.bat                 # Windows 一键启动（探测 Python / 装依赖 / 查端口）
+├── run.sh                  # macOS / Linux 一键启动
 ├── requirements.txt
-├── clientExample.js        # ComfyUI 侧原始示例（未改动）
+├── clientExample.js        # ComfyUI 侧示例（已改为 WebSocket 连接复用）
 ├── 开发说明.txt
 ├── webpageClient/          # 网页客户端
-│   ├── index.html          #   结构
+│   ├── index.html          #   结构（含客户端面板）
 │   ├── style.css           #   暗色 + 撞色 UI
-│   └── app.js              #   WS 接收 / 画廊 / 灯箱 / ZIP 打包
+│   └── app.js              #   WS 接收 / 画廊 / 灯箱 / ZIP 打包 / 客户端列表
 ├── tools/
-│   ├── test_client.py      # 模拟 ComfyUI 推图（含纯代码生成测试图）
-│   ├── verify.py           # 后端端到端自检（17 项）
-│   └── verify_frontend.js  # 前端逻辑离线校验（35 项，DOM 桩）
+│   ├── test_client.py       # 模拟 ComfyUI 推图（含纯代码生成测试图）
+│   ├── verify.py            # 后端端到端自检（17 项）
+│   ├── verify_clients.py    # 客户端列表自检（29 项）
+│   ├── verify_frontend.js   # 前端逻辑离线校验（53 项，DOM 桩）
+│   └── verify_ws_reuse.js   # 连接复用逻辑测试（28 项，桩 WebSocket）
 └── saved_images/           # 图片落盘目录（自动创建）
 ```
 
@@ -172,8 +211,15 @@ MoyuWebscoketServer/
 **图片落盘用线程池** —— `write_bytes` 丢进 `asyncio.to_thread`，
 不让磁盘 IO 阻塞事件循环，否则大图批量推送时会卡住整个广播。
 
+**每个连接一把发送锁** —— aiohttp 不允许对同一个 socket 并发 `send_str`。
+「有人断开」和「有人接入」会同时触发广播，必须按连接串行化，
+否则连接会被直接打断（客户端表现为刚连上就断）。
+
 **文件名安全化** —— 标签里的路径分隔符、特殊字符统一过滤，
 日期 + 短随机串避免重名，重名再自动加序号。
+
+**客户端名保留 Unicode** —— 文件名走 ASCII 白名单清洗，
+但客户端显示名只剔除控制字符和路径分隔符，中文名必须原样显示。
 
 **格式识别不靠扩展名** —— 直接读文件头魔数判 PNG/JPEG/GIF/BMP/WEBP，
 ComfyUI 给什么格式就存什么格式。
@@ -207,4 +253,17 @@ A：服务默认只听 `127.0.0.1`，必须 `--host 0.0.0.0`；
 还要确认 Windows 防火墙放行了 8080。
 
 **Q：能同时开多个网页窗口吗**
-A：可以，多个窗口都会收到广播，顶部「在线窗口」会同步计数。
+A：可以，多个窗口都会收到广播。点顶栏 `👥` 能看到所有在线客户端，
+自己的窗口标「我」，面板底部可以给自己改名。
+
+**Q：ComfyUI 跑了很多次之后连不上 / 报连接失败**
+A：多半是旧写法每次 `new WebSocket()` 导致的端口耗尽。
+改用本仓库的 `clientExample.js`（已做连接复用），或至少自己加个连接缓存。
+
+**Q：客户端列表里没有 ComfyUI**
+A：推送端要连 8001 端口才能被登记。如果用 `?client=名字` 自报身份，
+名字会显示在列表里；不传则自动生成 `ComfyUI-xxxx`。
+
+**Q：run.bat 双击后闪退**
+A：说明没检测到 Python。装 Python 3.8+ 时记得勾选 "Add Python to PATH"，
+或在命令行里执行 `run.bat` 看具体报错。

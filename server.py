@@ -44,7 +44,7 @@ import uuid
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 try:
     from aiohttp import WSMsgType, web
@@ -181,6 +181,24 @@ def safe_stem(name: Optional[str], fallback: str) -> str:
         return fallback
     stem = _SAFE_NAME.sub("_", str(name)).strip("._-")
     return stem[:60] or fallback
+
+
+# 客户端名允许中日韩等 Unicode 字母，只剔除控制字符和路径分隔符
+_UNSAFE_CHARS = re.compile(r"[\x00-\x1f\x7f<>:\"/\\|?*]+")
+
+
+def clean_client_name(name: Optional[str], fallback: str, limit: int = 24) -> str:
+    """
+    清洗客户端显示名。
+
+    与 safe_stem 的区别：**保留 Unicode**（中文名必须能正常显示），
+    只剔除控制字符、路径分隔符等危险字符。
+    """
+    if not name:
+        return fallback
+    text = _UNSAFE_CHARS.sub("", str(name)).strip()
+    text = re.sub(r"\s+", " ", text)
+    return text[:limit] or fallback
 
 
 def json_dumps(obj: Any) -> str:
@@ -388,33 +406,102 @@ class ImageStore:
 
 
 # --------------------------------------------------------------------------- #
-# 广播中心
+# 广播中心 + 在线客户端登记
 # --------------------------------------------------------------------------- #
+@dataclass
+class ClientInfo:
+    """一个已连接的客户端（网页端或 ComfyUI 推送端）。"""
+
+    id: str
+    name: str
+    kind: str  # "web"=网页端  "sender"=ComfyUI 推送端
+    ip: str
+    user_agent: str = ""
+    connected_at: float = 0.0
+    connected_at_text: str = ""
+    sent: int = 0  # 该客户端推送的图片数（仅 sender）
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = asdict(self)
+        d["connected_seconds"] = int(time.time() - self.connected_at)
+        return d
+
+
 class Broadcaster:
-    """维护网页客户端连接池并广播 JSON 消息。"""
+    """
+    维护网页客户端连接池并广播 JSON 消息。
+
+    同时承担「在线客户端登记簿」的职责：记录每个连接的名称 / IP / 连接时间，
+    供网页端展示「当前已连接的客户端列表」。
+    """
 
     def __init__(self) -> None:
-        self._clients: Set[web.WebSocketResponse] = set()
+        self._clients: Dict[web.WebSocketResponse, ClientInfo] = {}
+        # 每个连接一把发送锁：aiohttp 不允许对同一个 socket 并发 send_str，
+        # 而「有人断开」与「有人接入」会同时触发广播，必须串行化。
+        self._send_locks: Dict[web.WebSocketResponse, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
+
+    def _lock_for(self, ws: web.WebSocketResponse) -> asyncio.Lock:
+        """取（并惰性创建）某连接的发送锁。"""
+        lock = self._send_locks.get(ws)
+        if lock is None:
+            lock = self._send_locks[ws] = asyncio.Lock()
+        return lock
 
     @property
     def count(self) -> int:
+        """网页端连接数（保持与前端「在线窗口」语义一致）。"""
         return len(self._clients)
 
-    async def add(self, ws: web.WebSocketResponse) -> None:
-        async with self._lock:
-            self._clients.add(ws)
+    def snapshot(self, kind: Optional[str] = None) -> List[Dict[str, Any]]:
+        """返回在线客户端列表，按连接时间倒序（最新在前）。"""
+        items = [
+            info.to_dict()
+            for info in self._clients.values()
+            if kind is None or info.kind == kind
+        ]
+        items.sort(key=lambda d: d.get("connected_at", 0), reverse=True)
+        return items
 
-    async def remove(self, ws: web.WebSocketResponse) -> None:
+    def find(self, name: str) -> Optional[ClientInfo]:
+        """按名称查客户端（同名取最早连接的那个）。"""
+        hits = [i for i in self._clients.values() if i.name == name]
+        return min(hits, key=lambda i: i.connected_at) if hits else None
+
+    def count_send(self) -> int:
+        return sum(1 for i in self._clients.values() if i.kind == "sender")
+
+    async def add(
+        self,
+        ws: web.WebSocketResponse,
+        info: ClientInfo,
+    ) -> ClientInfo:
         async with self._lock:
-            self._clients.discard(ws)
+            self._clients[ws] = info
+            self._send_locks.setdefault(ws, asyncio.Lock())
+        return info
+
+    async def remove(self, ws: web.WebSocketResponse) -> Optional[ClientInfo]:
+        async with self._lock:
+            self._send_locks.pop(ws, None)
+            return self._clients.pop(ws, None)
+
+    def bump_sent(self, ws: web.WebSocketResponse) -> None:
+        """累加该客户端的推送计数（热路径，不加锁 —— 单事件循环内足够）。"""
+        info = self._clients.get(ws)
+        if info is not None:
+            info.sent += 1
 
     async def send(self, ws: web.WebSocketResponse, payload: Dict[str, Any]) -> bool:
-        try:
-            await ws.send_str(json_dumps(payload))
-            return True
-        except Exception:
-            return False
+        """单播（带锁，避免与广播并发写同一个 socket）。"""
+        text = json_dumps(payload)
+        async with self._lock_for(ws):
+            try:
+                await ws.send_str(text)
+                return True
+            except Exception:
+                return False
 
     async def broadcast(self, payload: Dict[str, Any]) -> int:
         """广播给所有客户端，返回成功送达的连接数。"""
@@ -424,13 +511,20 @@ class Broadcaster:
             return 0
 
         text = json_dumps(payload)
-        results = await asyncio.gather(
-            *(ws.send_str(text) for ws in targets), return_exceptions=True
-        )
+
+        async def one(ws: web.WebSocketResponse) -> bool:
+            async with self._lock_for(ws):
+                try:
+                    await ws.send_str(text)
+                    return True
+                except Exception:
+                    return False
+
+        results = await asyncio.gather(*(one(ws) for ws in targets), return_exceptions=True)
         alive: List[web.WebSocketResponse] = []
         ok = 0
         for ws, res in zip(targets, results):
-            if isinstance(res, Exception):
+            if isinstance(res, Exception) or res is not True:
                 continue
             ok += 1
             alive.append(ws)
@@ -439,8 +533,26 @@ class Broadcaster:
             async with self._lock:
                 for ws in targets:
                     if ws not in alive:
-                        self._clients.discard(ws)
+                        self._clients.pop(ws, None)
+                        self._send_locks.pop(ws, None)
         return ok
+
+    async def broadcast_clients(self) -> None:
+        """广播最新的客户端列表（有人连上/断开时调用）。"""
+        await self.broadcast(
+            {
+                "type": "clients",
+                "clients": self.snapshot(),
+                "stats": self.stats_payload(),
+            }
+        )
+
+    def stats_payload(self) -> Dict[str, Any]:
+        return {
+            "web_clients": self.count,
+            "sender_clients": self.count_send(),
+            "total_clients": len(self._clients),
+        }
 
 
 # --------------------------------------------------------------------------- #
@@ -470,12 +582,41 @@ class MoyuServer:
         await ws.prepare(request)
 
         peer = request.remote or "unknown"
-        self.log(f"ComfyUI 客户端已连接：{peer}")
+
+        # 允许推送端在 URL 上带 name / client 标识自己：ws://host:8001?client=ComfyUI-01
+        raw_name = (request.query.get("client") or request.query.get("name") or "").strip()
+        name = clean_client_name(raw_name, f"ComfyUI-{uuid.uuid4().hex[:4]}")
+
+        # 同名连接视为重连顶替，旧连接登记移除，避免列表出现重复条目
+        stale = self.hub.find(name)
+        info = ClientInfo(
+            id=uuid.uuid4().hex[:8],
+            name=name,
+            kind="sender",
+            ip=peer,
+            user_agent=request.headers.get("User-Agent", "")[:120],
+            connected_at=time.time(),
+            connected_at_text=datetime.now().strftime("%H:%M:%S"),
+        )
+        await self.hub.add(ws, info)
+        if stale is not None:
+            self.log(f"检测到同名客户端「{name}」重连，顶替旧登记", "warn")
+        await self.hub.broadcast_clients()
+
+        self.log(f"ComfyUI 客户端已连接：{name}（{peer}）")
 
         stats = self._stats_payload()
         await self.hub.send(
             ws,
-            {"type": "welcome", "app": APP_NAME, "version": VERSION, "stats": stats},
+            {
+                "type": "welcome",
+                "app": APP_NAME,
+                "version": VERSION,
+                "client_id": info.id,
+                "client_name": info.name,
+                "reused": stale is not None,
+                "stats": stats,
+            },
         )
 
         try:
@@ -489,7 +630,9 @@ class MoyuServer:
                     self.log(f"连接异常：{ws.exception()}", "warn")
                     break
         finally:
-            self.log(f"ComfyUI 客户端断开：{peer}")
+            gone = await self.hub.remove(ws)
+            await self.hub.broadcast_clients()
+            self.log(f"ComfyUI 客户端断开：{(gone or info).name}（{peer}）")
 
         return ws
 
@@ -576,12 +719,15 @@ class MoyuServer:
         )
         self.log(f"收到图片（{len(data) / 1024:.1f} KB, {dims}）— {save_note}")
 
-        # 广播给网页客户端
+        self.hub.bump_sent(ws)
+
+        # 广播给网页客户端（附带最新客户端列表，保证计数同步）
         await self.hub.broadcast(
             {
                 "type": "image",
                 "record": rec.to_dict() if rec else self._virtual_record(data).to_dict(),
                 "stats": self._stats_payload(),
+                "clients": self.hub.snapshot(),
             }
         )
 
@@ -624,15 +770,17 @@ class MoyuServer:
         return Path(__file__).parent / "webpageClient"
 
     def _stats_payload(self) -> Dict[str, Any]:
-        return {
+        stats = {
             "images": self.store.count,
             "bytes": self.store.total_bytes,
-            "clients": self.hub.count,
+            "clients": self.hub.count,  # 网页端连接数（保持与前端「在线窗口」一致）
             "saving": self.store.enabled,
             "save_dir": str(self.cfg.save_dir) if self.store.enabled else "",
             "uptime": int(time.time() - self.started_at),
             "version": VERSION,
         }
+        stats.update(self.hub.stats_payload())
+        return stats
 
     async def http_index(self, request: web.Request) -> web.StreamResponse:
         index = self._web_root() / "index.html"
@@ -651,10 +799,29 @@ class MoyuServer:
             limit = 200
         limit = max(1, min(limit, self.cfg.history_limit))
         items = [r.to_dict() for r in self.store.records()[:limit]]
-        return json_response({"ok": True, "items": items, "stats": self._stats_payload()})
+        return json_response(
+            {
+                "ok": True,
+                "items": items,
+                "stats": self._stats_payload(),
+                "clients": self.hub.snapshot(),
+            }
+        )
 
     async def api_stats(self, request: web.Request) -> web.Response:
-        return json_response({"ok": True, "stats": self._stats_payload()})
+        return json_response(
+            {"ok": True, "stats": self._stats_payload(), "clients": self.hub.snapshot()}
+        )
+
+    async def api_clients(self, request: web.Request) -> web.Response:
+        """已连接客户端列表（网页端面板的兜底轮询接口）。"""
+        return json_response(
+            {
+                "ok": True,
+                "clients": self.hub.snapshot(),
+                "stats": self._stats_payload(),
+            }
+        )
 
     async def serve_media(self, request: web.Request) -> web.StreamResponse:
         rec = self.store.get(request.match_info["image_id"])
@@ -702,10 +869,23 @@ class MoyuServer:
         ws = web.WebSocketResponse(heartbeat=30, max_msg_size=self.cfg.max_msg_size)
         await ws.prepare(request)
 
-        await self.hub.add(ws)
         peer = request.remote or "unknown"
-        self.log(f"网页客户端已连接：{peer}（当前 {self.hub.count} 个）")
+        raw_name = (request.query.get("name") or "").strip()
+        name = clean_client_name(raw_name, f"网页-{uuid.uuid4().hex[:4]}")
 
+        info = ClientInfo(
+            id=uuid.uuid4().hex[:8],
+            name=name,
+            kind="web",
+            ip=peer,
+            user_agent=request.headers.get("User-Agent", "")[:120],
+            connected_at=time.time(),
+            connected_at_text=datetime.now().strftime("%H:%M:%S"),
+        )
+        await self.hub.add(ws, info)
+        self.log(f"网页客户端已连接：{name}（{peer}，当前 {self.hub.count} 个）")
+
+        # 先给本窗口发 hello（含自己的 id），再广播名单给所有人（含自己）
         await self.hub.send(
             ws,
             {
@@ -713,9 +893,12 @@ class MoyuServer:
                 "app": APP_NAME,
                 "version": VERSION,
                 "stats": self._stats_payload(),
+                "clients": self.hub.snapshot(),
+                "self_id": info.id,
                 "items": [r.to_dict() for r in self.store.records()],
             },
         )
+        await self.hub.broadcast_clients()
 
         try:
             async for msg in ws:
@@ -727,8 +910,9 @@ class MoyuServer:
                 elif msg.type == WSMsgType.ERROR:
                     break
         finally:
-            await self.hub.remove(ws)
-            self.log(f"网页客户端断开：{peer}（剩余 {self.hub.count} 个）")
+            gone = await self.hub.remove(ws)
+            await self.hub.broadcast_clients()
+            self.log(f"网页客户端断开：{(gone or info).name}（剩余 {self.hub.count} 个）")
 
         return ws
 
@@ -737,6 +921,7 @@ class MoyuServer:
         app.router.add_get("/", self.http_index)
         app.router.add_get("/api/history", self.api_history)
         app.router.add_get("/api/stats", self.api_stats)
+        app.router.add_get("/api/clients", self.api_clients)
         app.router.add_post("/api/clear", self.api_clear)
         app.router.add_delete("/api/history/{image_id}", self.api_delete)
         app.router.add_get(MEDIA_PREFIX + "{image_id}", self.serve_media)

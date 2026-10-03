@@ -70,15 +70,20 @@ function queryAll(root, sel) {
 const byId = {};
 const IDS = [
   'gallery', 'empty', 'emptyWs', 'emptyHttp', 'conn', 'statImages', 'statClients',
-  'statSize', 'statUptime', 'viewCount', 'btnPause', 'btnSound', 'soundIcon',
-  'btnSaveAll', 'btnClear', 'lightbox', 'lbImg', 'lbTitle', 'lbTags',
+  'statSenders', 'statSize', 'statUptime', 'viewCount', 'btnPause', 'btnSound',
+  'soundIcon', 'btnSaveAll', 'btnClear', 'btnClients', 'badgeClients',
+  'clientsPanel', 'panelBody', 'panelCount', 'panelEmpty', 'panelClose',
+  'selfName', 'btnRename', 'lightbox', 'lbImg', 'lbTitle', 'lbTags',
   'lbClose', 'lbPrev', 'lbNext', 'toasts', 'sortMode',
 ];
-IDS.forEach((id) => { byId[id] = new FakeEl(id === 'gallery' ? 'div' : 'div'); });
+IDS.forEach((id) => { byId[id] = new FakeEl('div'); });
 byId.conn.appendChild((byId.connText = new FakeEl('span')));
 byId.btnSound.appendChild(byId.soundIcon);
 byId.lbPrev.style.display = '';
 byId.lbNext.style.display = '';
+byId.clientsPanel.hidden = true;
+byId.selfName.value = '';
+byId.panelCount.textContent = '0';
 const doc = {
   getElementById: (id) => byId[id] || null,
   querySelectorAll: (sel) => {
@@ -244,6 +249,54 @@ check(byId.soundIcon.textContent === '🔕', '静音图标切换', byId.soundIco
 section('CRC32（ZIP 打包依赖）');
 const crc = vm.runInContext('crc32(new Uint8Array([1,2,3,4,5]))', ctx);
 check(crc === 0x8c7a3b2d || typeof crc === 'number', 'crc32 返回合法数值', '0x' + (crc >>> 0).toString(16));
+
+/* ---------- 在线客户端列表 ---------- */
+section('客户端列表渲染');
+vm.runInContext('state.selfId = ""; state.selfName = "我的窗口"; applyClients([]);', ctx);
+check(byId.panelCount.textContent === '0', '空名单计数为 0', byId.panelCount.textContent);
+check(byId.badgeClients.textContent === '0', '顶栏徽标为 0', byId.badgeClients.textContent);
+
+vm.runInContext(`applyStats({ images:0, bytes:0, clients:2, sender_clients:1, uptime:10 });
+applyClients([
+  { id:'w1', name:'我的窗口', kind:'web', ip:'127.0.0.1', connected_at_text:'10:00', connected_seconds:65, sent:0 },
+  { id:'w2', name:'同事窗口', kind:'web', ip:'192.168.1.5', connected_at_text:'10:01', connected_seconds:12, sent:0 },
+  { id:'s1', name:'ComfyUI', kind:'sender', ip:'127.0.0.1', connected_at_text:'10:02', connected_seconds:30, sent:7 },
+]);`, ctx);
+
+check(byId.panelCount.textContent === '3', '计数显示 3 个客户端', byId.panelCount.textContent);
+check(byId.badgeClients.textContent === '3', '顶栏徽标为 3', byId.badgeClients.textContent);
+check(byId.panelBody.children.length === 3, '渲染 3 条客户端条目', String(byId.panelBody.children.length));
+check(byId.btnClients.classList.contains('has-clients'), '有他人在线时顶栏按钮发光');
+check(byId.statClients.textContent === '2', '网页窗口数同步为 2', byId.statClients.textContent);
+check(byId.statSenders.textContent === '1', '推送端数同步为 1', byId.statSenders.textContent);
+
+section('认领「我」自己');
+// 服务端 hello 下发 self_id 后应正确标记
+vm.runInContext(`handleMessage({ type:'hello', self_id:'w2', client_name:'同事窗口', clients:[
+  { id:'w1', name:'我的窗口', kind:'web', ip:'127.0.0.1', connected_seconds:65, sent:0 },
+  { id:'w2', name:'同事窗口', kind:'web', ip:'192.168.1.5', connected_seconds:12, sent:0 },
+], stats:{ images:0, bytes:0, clients:2, sender_clients:0, uptime:10 }, items:[] });`, ctx);
+check(vm.runInContext('state.selfId', ctx) === 'w2', 'self_id 已记录', String(vm.runInContext('state.selfId', ctx)));
+check(vm.runInContext('state.selfName', ctx) === '同事窗口', 'selfName 跟随服务端');
+
+section('面板开合');
+check(byId.clientsPanel.hidden === true, '默认收起');
+vm.runInContext('togglePanel(true)', ctx);
+check(byId.clientsPanel.hidden === false, '可展开面板');
+vm.runInContext('togglePanel(false)', ctx);
+check(byId.clientsPanel.hidden === true, '可收起面板');
+
+section('改名触发重连');
+// 自名输入框的值要能从 VM 里读到，故通过 selfName 桩直接赋值
+byId.selfName.value = '新名字';
+vm.runInContext("state.ws = { readyState: 1, close(){ globalThis.__closed = true; } }; renameSelf();", ctx);
+check(vm.runInContext('state.selfName', ctx) === '新名字', '新名字已保存');
+check(global.__closed === true, '改名后主动关闭旧连接以重新登记');
+
+section('时长格式化');
+check(vm.runInContext('fmtDuration(5)', ctx) === '5 秒', '秒级');
+check(vm.runInContext('fmtDuration(83)', ctx) === '1 分 23 秒', '分钟级');
+check(vm.runInContext('fmtDuration(3720)', ctx) === '1 小时 2 分', '小时级');
 
 section('断线重连');
 FakeWS.last.onclose();
