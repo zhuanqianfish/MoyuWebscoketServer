@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul 2>&1
-setlocal enabledelayedexpansion
+setlocal
 title Moyu 图片中转站
 
 cd /d "%~dp0"
@@ -11,92 +11,64 @@ echo    摸鱼图片中转站 - Windows 启动脚本
 echo  ============================================
 echo.
 
-REM ---------- 1. 探测 Python ----------
+rem ---------- [1/4] 探测 Python（优先项目 .venv） ----------
 set "PY="
+if exist ".venv\Scripts\python.exe" set "PY=.venv\Scripts\python.exe"
+if defined PY goto :have_py
 
-REM 优先用本项目自带的 .venv
-if exist ".venv\Scripts\python.exe" (
-    set "PY=.venv\Scripts\python.exe"
-    echo [1/4] 使用项目虚拟环境 .venv
-    goto :deps
-)
+where py >nul 2>&1 && set "PY=py -3"
+if defined PY goto :have_py
 
-REM 其次用 py 启动器
-where py >nul 2>&1
-if %errorlevel%==0 (
-    py -3 -c "import sys" >nul 2>&1
-    if !errorlevel!==0 (
-        set "PY=py -3"
-        echo [1/4] 使用 py 启动器指定的 Python 3
-        goto :deps
-    )
-)
+where python >nul 2>&1 && set "PY=python"
+if defined PY goto :have_py
 
-REM 再试 python
-where python >nul 2>&1
-if %errorlevel!==0 (
-    python -c "import sys" >nul 2>&1
-    if !errorlevel!==0 (
-        set "PY=python"
-        echo [1/4] 使用系统 python
-        goto :deps
-    )
-)
-
-echo.
 echo [错误] 没有检测到 Python！
 echo.
-echo   请先安装 Python 3.8 或更高版本：
-echo     https://www.python.org/downloads/
-echo.
-echo   安装时记得勾选 "Add Python to PATH"
+echo   请先安装 Python 3.8 或更高版本，安装时勾选 "Add Python to PATH"
+echo   https://www.python.org/downloads/
 echo.
 pause
 exit /b 1
 
-:deps
-REM ---------- 2. 检查依赖 ----------
+:have_py
+echo [1/4] 使用 Python: %PY%
+
+rem ---------- [2/4] 依赖检查 ----------
 echo [2/4] 检查依赖 aiohttp ...
 %PY% -c "import aiohttp" >nul 2>&1
-if !errorlevel!==0 (
-    echo       aiohttp 已就绪
-) else (
-    echo       aiohttp 缺失，正在安装 ...
-    %PY% -m pip install -r requirements.txt
-    if !errorlevel! neq 0 (
-        echo.
-        echo [错误] 依赖安装失败，请手动执行：
-        echo         %PY% -m pip install -r requirements.txt
-        echo.
-        pause
-        exit /b 1
-    )
-)
+if errorlevel 1 goto :install_deps
+echo       aiohttp 已就绪
+goto :check_ports
 
-REM ---------- 3. 端口占用提示 ----------
+:install_deps
+echo       aiohttp 缺失，正在安装 ...
+%PY% -m pip install -r requirements.txt
+if errorlevel 1 goto :pip_fail
+echo       依赖安装完成
+goto :check_ports
+
+:pip_fail
+echo.
+echo [错误] 依赖安装失败，请手动执行:
+echo        %PY% -m pip install -r requirements.txt
+echo.
+pause
+exit /b 1
+
+:check_ports
+rem ---------- [3/4] 端口检查 ----------
 echo [3/4] 检查端口 ...
-netstat -ano 2>nul | findstr ":8001" | findstr "LISTENING" >nul
-if !errorlevel!==0 (
-    echo       警告：8001 端口已被占用，ComfyUI 可能连不上
-) else (
-    echo       8001 端口可用
-)
+call :port_check 8001
+call :port_check 8080
 
-netstat -ano 2>nul | findstr ":8080" | findstr "LISTENING" >nul
-if !errorlevel!==0 (
-    echo       警告：8080 端口已被占用，网页可能打不开
-) else (
-    echo       8080 端口可用
-)
-
-REM ---------- 4. 启动 ----------
+rem ---------- [4/4] 启动 ----------
 echo [4/4] 启动服务 ...
 echo.
 echo   网页查看 : http://127.0.0.1:8080/
 echo   推送地址 : ws://127.0.0.1:8001
-echo.
+echo   局域网访问: 把 127.0.0.1 换成本机内网 IP
 echo   按 Ctrl+C 停止服务
-echo   ============================================
+echo  ============================================
 echo.
 
 %PY% server.py --open-browser
@@ -104,3 +76,14 @@ echo.
 echo.
 echo 服务已停止。
 pause
+exit /b 0
+
+rem ---------- 子过程: 检查指定端口是否被监听 ----------
+:port_check
+netstat -ano 2>nul | findstr ":%1 " | findstr "LISTENING" >nul 2>&1
+if errorlevel 1 (
+    echo       %1 端口可用
+) else (
+    echo       警告: %1 端口已被占用，相关功能可能连不上
+)
+goto :eof

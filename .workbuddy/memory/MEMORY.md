@@ -31,6 +31,11 @@ ComfyUI 出图的中转站：**ComfyUI 推 base64 → Python 服务端解码落�
   这是有意设计（不引入数据库），新推送的图片会重建索引。
 - **UI 走暗色 + 撞色**（电光青 `#00e5ff` / 荧光粉 `#ff2e9a` / 紫罗兰 `#7c5cff`），
   噪点叠加避免渐变色带。图片一律 `object-fit: contain` —— 不裁切画面。
+- **run.bat 不能用 Write 工具直接写**：落盘是 UTF-8+LF，cmd 双击闪退
+  （LF-only 让 goto 失效；BOM 会拼进首条命令）。必须用
+  `tools/gen_run_bat.py` 字节级生成（UTF-8 无 BOM + 全 CRLF），
+  改启动脚本后跑 `tools/_check_bat.py` 体检 + `tools/_probe_bat.py` 真实验证。
+  通用规则已记入用户级记忆（Windows 批处理编码铁律）。
 
 ## 命令
 
