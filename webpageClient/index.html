@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>摸鱼图片中转站 · 实时看图</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖼️</text></svg>" />
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<!-- ── 背景光晕 ─────────────────────────────────────────── -->
+<div class="aurora" aria-hidden="true">
+  <span class="blob b1"></span>
+  <span class="blob b2"></span>
+  <span class="blob b3"></span>
+  <span class="grain"></span>
+</div>
+
+<!-- ── 顶栏 ─────────────────────────────────────────────── -->
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">◐</div>
+    <div class="brand-text">
+      <h1>摸鱼图片中转站</h1>
+      <p>ComfyUI 出图 · 实时中转 · 一键保存</p>
+    </div>
+  </div>
+
+  <div class="stats" id="stats">
+    <div class="stat"><b id="statImages">0</b><span>已收图片</span></div>
+    <div class="stat"><b id="statClients">0</b><span>在线窗口</span></div>
+    <div class="stat"><b id="statSize">0 B</b><span>占用空间</span></div>
+    <div class="stat"><b id="statUptime">00:00</b><span>运行时长</span></div>
+  </div>
+
+  <div class="topbar-actions">
+    <div class="conn" id="conn">
+      <span class="dot"></span>
+      <span class="conn-text">连接中…</span>
+    </div>
+    <button class="btn ghost" id="btnSound" title="新图提示音">
+      <span id="soundIcon">🔔</span>
+    </button>
+  </div>
+</header>
+
+<!-- ── 工具栏 ───────────────────────────────────────────── -->
+<main class="toolbar">
+  <div class="filters">
+    <button class="chip active" data-filter="all">全部</button>
+    <button class="chip" data-filter="live">仅新图</button>
+    <select class="select" id="sortMode" title="排序">
+      <option value="new">最新在前</option>
+      <option value="old">最早在前</option>
+      <option value="big">体积最大</option>
+    </select>
+  </div>
+
+  <div class="toolbar-actions">
+    <span class="muted" id="viewCount">—</span>
+    <button class="btn" id="btnSaveAll" title="打包下载全部可见图片 (ZIP)">⬇ 打包保存</button>
+    <button class="btn" id="btnClear" title="清空历史并删除文件">🗑 清空</button>
+    <button class="btn primary" id="btnPause" title="暂停自动滚动">⏸ 暂停接收</button>
+  </div>
+</main>
+
+<!-- ── 图片墙 ───────────────────────────────────────────── -->
+<section class="gallery" id="gallery"></section>
+
+<!-- ── 空状态 ───────────────────────────────────────────── -->
+<div class="empty" id="empty">
+  <div class="empty-icon">📡</div>
+  <h2>等待 ComfyUI 推送图片</h2>
+  <p>在 ComfyUI 中运行 <code>clientExample.js</code> 里的发送代码，<br />图片会<b>立刻</b>出现在这里。</p>
+  <div class="empty-hint">
+    <span>推送地址：<code id="emptyWs">ws://…</code></span>
+    <span>查看地址：<code id="emptyHttp">http://…</code></span>
+  </div>
+</div>
+
+<!-- ── 灯箱 ─────────────────────────────────────────────── -->
+<div class="lightbox" id="lightbox" hidden>
+  <button class="lb-close" id="lbClose" title="关闭 (Esc)">✕</button>
+  <button class="lb-nav prev" id="lbPrev" title="上一张 (←)">‹</button>
+  <button class="lb-nav next" id="lbNext" title="下一张 (→)">›</button>
+
+  <figure class="lb-figure">
+    <img id="lbImg" alt="预览大图" />
+    <figcaption class="lb-meta">
+      <span class="lb-title" id="lbTitle">—</span>
+      <span class="lb-tags" id="lbTags"></span>
+    </figcaption>
+  </figure>
+</div>
+
+<!-- ── Toast ────────────────────────────────────────────── -->
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

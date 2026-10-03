@@ -1,0 +1,4 @@
+这是一个websocketServer服务端，
+它的功能是提供一个websocket 服务器并接收来自类似 clientExample.js  的请求并做进一步的处理
+
+例子是接收到的是base64编码的图片然后将其转化成图片输出给另一个web客户端（webPageclient），在该客户端接收到之后将其显示出来
