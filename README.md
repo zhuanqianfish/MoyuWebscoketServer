@@ -302,7 +302,7 @@ MoyuWebscoketServer/
 │   ├── test_client.py       # 模拟 ComfyUI 推图（含纯代码生成测试图）
 │   ├── verify.py            # 后端端到端自检（17 项）
 │   ├── verify_clients.py    # 客户端列表自检（29 项）
-│   ├── verify_command.py    # 指令功能自检（44 项）
+│   ├── verify_command.py    # 指令功能自检（56 项）
 │   ├── verify_frontend.js   # 前端逻辑离线校验（99 项，DOM 桩）
 │   ├── verify_ws_reuse.js   # 连接复用逻辑测试（28 项，桩 WebSocket）
 │   ├── gen_run_bat.py       # 字节级生成 run.bat（UTF-8 无 BOM + 全 CRLF）
